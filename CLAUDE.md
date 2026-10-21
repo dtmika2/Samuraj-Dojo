@@ -19,7 +19,7 @@ Gameplay:
 - Not a professional programmer. Explain in plain steps, avoid jargon, give exact click paths.
 - Writes in English; their Discord/OS UI is in **Czech** (e.g. "Stáhnout" = Download, "Kopírovat odkaz" = Copy link).
 - Timezone: Europe/Prague.
-- Tests on a headset in Figmin XR. Cannot easily read logs unless told how (see Debugging).
+- Tests on a **Meta Quest 3** in Figmin XR. Cannot easily read logs unless told how (see Debugging).
 
 ## Figmin XR API — essentials
 
@@ -78,7 +78,7 @@ Sections, in order:
 
 ## Next tasks
 
-1. **Host on GitHub Pages** (this repo). Settings → Pages → Branch `main`, folder `/(root)`. The game is then at `https://<user>.github.io/<repo>/`. The user opens that URL in Figmin's browser and accepts the spatial-app prompt. This replaces Discord links (which expire after ~24 h).
+1. ~~Host on GitHub Pages~~ — done 2026-10-21: Pages serves `main` / root at **https://dtmika2.github.io/Samuraj-Dojo/** (models at `.../models/game/`). Every push to `main` redeploys in ~1 min. The user opens that URL in Figmin's browser and accepts the spatial-app prompt. The full-detail Meshy originals are git-ignored (local only; a local branch `backup/start-of-project-with-originals` still holds the first commit that contained them — never push it).
 2. **Verify the loading fix** with the user (status box should reach "Start Game"). If it reports failures, get Console errors (see Debugging).
 3. **Verify the 3D models on the headset** (done in code, see Current status). If a model faces away, add 180 to `rec.yaw` for models; if toppling feels wrong for wide models, try `APPROXIMATE` colliders or a smaller `SAMURAI_HEIGHT`. New models: simplify the same way (`models/README.md`), inspect bounding box / facing / pivot before coding. None of the current models have animations.
 4. Playtest and tune constants in the TUNING block.
