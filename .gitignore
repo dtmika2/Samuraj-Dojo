@@ -1,0 +1,7 @@
+.DS_Store
+Thumbs.db
+node_modules/
+*.zip
+
+# Full-detail Meshy originals (50-64 MB each) stay local; the game uses models/game/
+models/Meshy_AI_*.glb

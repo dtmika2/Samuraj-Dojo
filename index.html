@@ -1,0 +1,1273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="figmin">
+<title>Samurai Dojo</title>
+<style>
+  :root {
+    --ink: #17120e;
+    --paper: #f3e9d6;
+    --red: #b3261e;
+    --gold: #d4a017;
+    --muted: #8a7a66;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { padding: 24px; max-width: 760px; margin: 0 auto; }
+  h1 {
+    margin: 0 0 4px;
+    font-size: 40px;
+    letter-spacing: 2px;
+  }
+  h1 span { color: var(--red); }
+  .sub { color: var(--muted); font-size: 18px; margin: 0 0 20px; }
+  .hud {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+  .stat {
+    background: #241c15;
+    border: 2px solid #3a2e22;
+    border-radius: 14px;
+    padding: 12px 10px;
+    text-align: center;
+  }
+  .stat .label { display: block; font-size: 16px; color: var(--muted); letter-spacing: 2px; }
+  .stat .value { display: block; font-size: 48px; font-weight: 700; line-height: 1.1; }
+  #time.low { color: var(--red); }
+  #status {
+    min-height: 56px;
+    font-size: 20px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    background: #241c15;
+    border-left: 6px solid var(--gold);
+    margin-bottom: 18px;
+  }
+  button {
+    width: 100%;
+    min-height: 88px;
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: var(--paper);
+    background: var(--red);
+    border: none;
+    border-radius: 18px;
+    cursor: pointer;
+    margin-bottom: 18px;
+  }
+  button:hover, button:focus-visible { background: #d0342a; outline: 4px solid var(--gold); }
+  button:disabled { background: #4a3d31; color: var(--muted); outline: none; cursor: default; }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 22px;
+    min-height: 72px;
+    padding: 0 16px;
+    border-radius: 14px;
+    background: #241c15;
+    margin-bottom: 20px;
+    cursor: pointer;
+  }
+  .toggle input { width: 40px; height: 40px; accent-color: var(--red); }
+  .howto { font-size: 19px; line-height: 1.6; color: #d8ccb6; padding-left: 26px; margin: 0; }
+  .howto b { color: var(--paper); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>&#x2694; Samurai <span>Dojo</span></h1>
+  <p class="sub">Topple as many cardboard samurai as you can in 60 seconds.</p>
+
+  <div class="hud">
+    <div class="stat"><span class="label">TIME</span><span class="value" id="time">60</span></div>
+    <div class="stat"><span class="label">SCORE</span><span class="value" id="score">0</span></div>
+    <div class="stat"><span class="label">BEST</span><span class="value" id="best">0</span></div>
+  </div>
+
+  <div id="status">Waiting for Figmin XR&hellip;</div>
+
+  <button id="startBtn" disabled>Preparing&hellip;</button>
+
+  <label class="toggle">
+    <input type="checkbox" id="bombToggle" checked figmin-persist-state="bombsEnabled">
+    Bombs end the game
+  </label>
+
+  <ol class="howto">
+    <li>Tap the <b>controller connect icon</b> on this window first (until then the katana is locked &mdash; otherwise the trigger would make copies of it).</li>
+    <li><b>Grab the katana</b> floating next to this window and swing it.</li>
+    <li>Press a <b>trigger</b> (or A / X) to throw a <b>shuriken</b> from that hand.</li>
+    <li>Cardboard samurai = <b>1 point</b>. Colourful armoured shogun = <b>3 points</b>.</li>
+    <li>Spare the <b>monk</b> and the <b>geisha</b> &mdash; toppling one costs <b>2 points</b>.</li>
+    <li>Don't hit the <b>black bomb</b> &mdash; it ends the game instantly.</li>
+  </ol>
+</div>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   TUNING — tweak these to change the feel of the game
+   ========================================================================= */
+const GAME_SECONDS       = 60;    // round length
+const NORMAL_POOL        = 6;     // max normal samurai at once
+const SHOGUN_POOL        = 2;     // max shogun samurai at once
+const INNOCENT_POOL      = 2;     // max innocents (monk / geisha) at once
+const SHOGUN_CHANCE      = 0.2;   // chance a spawn is a shogun
+const INNOCENT_CHANCE    = 0.2;   // chance a spawn is an innocent
+const NORMAL_POINTS      = 1;
+const SHOGUN_POINTS      = 3;
+const INNOCENT_POINTS    = -2;    // toppling a monk or geisha costs points
+const HIT_CREDIT_SECONDS = 4;     // a fall only counts if you hit it (or it was hit by a falling one) this recently
+const EJECT_SPEED        = 3;     // m/s; faster than this right after rising, without a hit = pushed out by the room → removed
+const SPAWN_INTERVAL     = 1.5;   // seconds between spawns (when below cap)
+const START_ALIVE        = 3;     // samurai on field at start…
+const ALIVE_RAMP_SECONDS = 15;    // …+1 more every N seconds
+const SPAWN_MIN_DIST     = 1.6;   // meters from player
+const SPAWN_MAX_DIST     = 3.0;
+const SPAWN_ARC_DEG      = 55;    // +/- degrees from where you faced at start
+const FALL_UP_Y          = 0.45;  // tipped when up-vector y drops below this
+const SHURIKEN_POOL      = 8;
+const SHURIKEN_SPEED     = 14;    // m/s
+const SHURIKEN_LIFETIME  = 3.5;   // seconds before it disappears
+const THROW_COOLDOWN     = 0.25;  // seconds per hand
+const KATANA_MIN_SPEED   = 1.0;   // blade-tip speed (m/s) needed to knock
+const BOMB_EVERY_MIN     = 9;     // seconds between bombs (random range)
+const BOMB_EVERY_MAX     = 14;
+const BOMB_LIFETIME      = 6;     // seconds a bomb stays
+
+/* 3D models (models/game/ in the repo). Figmin may embed this page when it is
+   deployed, so the models are loaded from the full GitHub Pages address. */
+const MODEL_BASE     = "https://dtmika2.github.io/Samuraj-Dojo/models/game/";
+const SAMURAI_HEIGHT = 1.4;   // meters, how tall the samurai stand
+const KATANA_LENGTH  = 1.0;   // meters, pommel to tip
+const NORMAL_MODELS   = ["samurai"];                           // 1 point
+const SHOGUN_MODELS   = ["samurai-warrior", "samurai-spear"];  // 3 points
+const INNOCENT_MODELS = ["monk", "geisha"];                    // -2 points
+/* targetSize sets a model's LARGEST side; models wider than tall need a bigger value */
+const MODEL_WIDTH_FIX = { "samurai-spear": 1.105 };  // largest side / height
+
+/* Samurai hit volume (scaled from each samurai's real size after loading) */
+const SAMURAI_AXIS_FRAC = 0.75;  // hit axis half-length, as a fraction of half the height
+const SAMURAI_RADIUS    = 0.3;   // hit radius around that axis (m)
+
+/* Katana blade, as fractions of the katana's length from its center (blade points along +Y) */
+const BLADE_BASE_FRAC = -0.21;   // guard
+const BLADE_TIP_FRAC  = 0.50;    // tip
+
+/* =========================================================================
+   Small vector math helpers (Figmin vectors are plain objects)
+   ========================================================================= */
+const V = {
+  add:  (a, b) => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }),
+  sub:  (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }),
+  scale:(a, s) => ({ x: a.x * s, y: a.y * s, z: a.z * s }),
+  dot:  (a, b) => a.x * b.x + a.y * b.y + a.z * b.z,
+  len:  (a) => Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z),
+  flat: (a) => ({ x: a.x, y: 0, z: a.z }),
+  norm: (a) => { const l = V.len(a); return l > 1e-6 ? V.scale(a, 1 / l) : { x: 0, y: 0, z: 0 }; },
+  zero: () => ({ x: 0, y: 0, z: 0 })
+};
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const rand  = (a, b) => a + Math.random() * (b - a);
+const DEG = 180 / Math.PI;
+
+/* Closest distance between segments p1-q1 and p2-q2 */
+function segSegDist(p1, q1, p2, q2) {
+  const d1 = V.sub(q1, p1), d2 = V.sub(q2, p2), r = V.sub(p1, p2);
+  const a = V.dot(d1, d1), e = V.dot(d2, d2), f = V.dot(d2, r);
+  const EPS = 1e-8;
+  let s, t;
+  if (a <= EPS && e <= EPS) return V.len(r);
+  if (a <= EPS) { s = 0; t = clamp(f / e, 0, 1); }
+  else {
+    const c = V.dot(d1, r);
+    if (e <= EPS) { t = 0; s = clamp(-c / a, 0, 1); }
+    else {
+      const b = V.dot(d1, d2), denom = a * e - b * b;
+      s = denom !== 0 ? clamp((b * f - c * e) / denom, 0, 1) : 0;
+      t = (b * s + f) / e;
+      if (t < 0)      { t = 0; s = clamp(-c / a, 0, 1); }
+      else if (t > 1) { t = 1; s = clamp((b - c) / a, 0, 1); }
+    }
+  }
+  const c1 = V.add(p1, V.scale(d1, s));
+  const c2 = V.add(p2, V.scale(d2, t));
+  return V.len(V.sub(c1, c2));
+}
+
+/* =========================================================================
+   DOM
+   ========================================================================= */
+const ui = {
+  time:   document.getElementById("time"),
+  score:  document.getElementById("score"),
+  best:   document.getElementById("best"),
+  status: document.getElementById("status"),
+  start:  document.getElementById("startBtn"),
+  bombs:  document.getElementById("bombToggle")
+};
+function setStatus(html) { ui.status.innerHTML = html; }
+
+/* =========================================================================
+   Game state
+   ========================================================================= */
+const game = {
+  phase: "loading",        // loading | ready | countdown | playing | over
+  now: 0,
+  timeLeft: GAME_SECONDS,
+  elapsed: 0,
+  score: 0,
+  best: 0,
+  spawnTimer: 0,
+  bombTimer: 0,
+  countdownStep: 0,
+  countdownTimer: 0,
+  arena: { center: V.zero(), yaw: 0 },
+  inputConnected: false,
+  lastShownSecond: -1,
+  lastShownScore: -1
+};
+
+let camera = null;
+let katana = null;
+let katanaName = "";
+let scoreboard = null;
+let banner = null;
+const samurai = [];               // { obj, kind, points, alive, fallen, rising, ... }
+const samuraiByOid = new Map();
+const shurikens = [];             // { obj, live, expire, dir }
+const popups = {};                // points -> pooled "+1" / "+3" / "-2" texts
+const bomb = { obj: null, live: false, expire: 0, base: V.zero(), phase: 0 };
+const hands = { left: null, right: null };
+const lastThrow = { left: -10, right: -10 };
+let prevTip = null;
+let tipVel = V.zero();
+
+let totalToLoad = 0;
+let loadedCount = 0;
+
+/* =========================================================================
+   Boot
+   ========================================================================= */
+document.addEventListener("FigminReady", init);
+
+function init() {
+  if (!figmin.isSpatialApp()) {
+    setStatus("This game needs to run as a <b>Spatial App</b>. Accept the deploy prompt.");
+    figmin.requireSpatialApp();
+    return;
+  }
+  if (!figmin.isMasterClient()) {
+    setStatus("The host is running the dojo. Watch the samurai fall!");
+    ui.start.textContent = "Host controls the game";
+    return;
+  }
+
+  figmin.loadState((data) => {
+    try {
+      const parsed = data ? JSON.parse(data) : null;
+      if (parsed && typeof parsed.best === "number") game.best = parsed.best;
+    } catch (e) { /* first run */ }
+    ui.best.textContent = game.best;
+  });
+
+  camera = figmin.getCamera();
+  loadStartTime = Date.now();
+  setStatus("Preparing the dojo&hellip;");
+
+  buildKatana();
+  buildSamuraiPool();
+  buildShurikenPool();
+  buildBomb();
+  buildTexts();
+  setupHands();
+
+  ui.start.addEventListener("click", startGame);
+  figmin.setUpdateFunction(tick);
+}
+
+const loadGroups = {};   // label -> { total, done, failed }
+let loadStartTime = Date.now();
+
+/* makeBackup (optional): if the object fails to load, this creates a replacement
+   (the built-in cardboard sketch) and loading continues with that instead. */
+function trackLoad(obj, onReady, label, makeBackup) {
+  label = label || "object";
+  totalToLoad++;
+  const g = loadGroups[label] || (loadGroups[label] = { total: 0, done: 0, failed: 0, backup: 0 });
+  g.total++;
+  let counted = false;
+
+  const finish = (ok) => {
+    if (counted) return;
+    counted = true;
+    if (ok) g.done++; else g.failed++;
+    loadedCount++;
+    if (loadedCount === totalToLoad) onAllLoaded();
+    else if (game.phase === "loading") {
+      setStatus("Preparing the dojo&hellip; (" + loadedCount + " / " + totalToLoad + ")");
+    }
+  };
+
+  const watch = (target, isBackup) => {
+    target.onStart((o) => {
+      try {
+        if (onReady) onReady(o);
+        finish(true);
+      } catch (e) {
+        console.error("Setup failed for " + label + ": " + (e && e.message ? e.message : e));
+        finish(false);
+      }
+    });
+    target.onError((o) => {
+      console.error("Failed to load " + label + ": " + o.status.code + " " + o.status.description);
+      if (!isBackup && makeBackup) {
+        console.warn("Using the built-in cardboard shape for " + label);
+        g.backup++;
+        watch(makeBackup(), true);
+      } else {
+        finish(false);
+      }
+    });
+  };
+  watch(obj, false);
+}
+
+function loadReport() {
+  return Object.keys(loadGroups).map((k) => {
+    const g = loadGroups[k];
+    const waiting = g.total - g.done - g.failed;
+    return k + " " + g.done + "/" + g.total +
+      (g.failed ? " (" + g.failed + " failed)" : "") +
+      (g.backup ? " (" + g.backup + " using backup shape)" : "") +
+      (waiting ? " (" + waiting + " waiting)" : "");
+  }).join(", ");
+}
+
+function checkLoadingStuck() {
+  if (game.phase !== "loading") return;
+  if (Date.now() - loadStartTime > 15000) {
+    setStatus("Still loading after 15 s &mdash; " + loadReport() +
+      ". Open the Console and send the errors to Claude.");
+    console.warn("Load report: " + loadReport());
+  }
+}
+
+function onAllLoaded() {
+  game.phase = "ready";
+  updateStartButton();
+  const anyFailed = Object.keys(loadGroups).some((k) => loadGroups[k].failed > 0 || loadGroups[k].backup > 0);
+  if (anyFailed) {
+    setStatus("Loaded with problems: " + loadReport() +
+      ". You can still play, but send the Console errors to Claude.");
+  } else {
+    setStatus(game.inputConnected
+      ? "Ready! Grab the katana and press <b>Start Game</b>."
+      : "Tap the <b>controller connect icon</b> on this window, then press <b>Start Game</b>.");
+  }
+  updateScoreboard(true);
+}
+
+/* The game needs the controller connection: without it the trigger belongs to
+   Figmin, and trigger-while-holding makes a COPY of the katana. */
+function updateStartButton() {
+  if (game.phase !== "ready" && game.phase !== "over") return;
+  ui.start.disabled = !game.inputConnected;
+  ui.start.textContent = !game.inputConnected ? "Connect controllers first"
+    : game.phase === "over" ? "Play Again" : "Start Game";
+}
+
+/* =========================================================================
+   Geometry builders (sketch strokes). Shurikens and the bomb always use these;
+   the katana and samurai use them only as a backup if a 3D model fails to load.
+   ========================================================================= */
+function box(brush, color, w, h, d, x, y, z) {
+  const s = figmin.sketch.boxStroke(brush, color, 0.001, w, h, d);
+  figmin.sketch.translateStroke(s, { x: x, y: y, z: z });
+  return s;
+}
+
+function katanaStrokes() {
+  const metal = figmin.brushes.MetallicHull;
+  const matte = figmin.brushes.MatteHull;
+  const steel = "#e6e9ef";
+  const strokes = [];
+
+  // Blade + slanted tip
+  strokes.push(box(metal, steel, 0.032, 0.66, 0.006, 0, 0.12, 0));
+  strokes.push(figmin.sketch.stroke(metal, steel, 0.001, [
+    figmin.sketch.point({ x: -0.016, y: 0.449, z: -0.003 }),
+    figmin.sketch.point({ x: -0.016, y: 0.449, z:  0.003 }),
+    figmin.sketch.point({ x:  0.016, y: 0.449, z: -0.003 }),
+    figmin.sketch.point({ x:  0.016, y: 0.449, z:  0.003 }),
+    figmin.sketch.point({ x:  0.014, y: 0.52, z: 0 })
+  ]));
+  // Collar, guard, grip, pommel
+  strokes.push(box(metal, "#d4a017", 0.036, 0.03, 0.012, 0, -0.195, 0));
+  strokes.push(box(metal, "#9c7410", 0.085, 0.014, 0.085, 0, -0.215, 0));
+  strokes.push(box(matte, "#1b1b1b", 0.034, 0.27, 0.03, 0, -0.36, 0));
+  [-0.26, -0.31, -0.36, -0.41, -0.46].forEach((y) => {
+    const d = box(matte, "#e8dcc0", 0.02, 0.02, 0.034, 0, y, 0);
+    figmin.sketch.rotateStroke(d, { x: 0, y: 0, z: 45 }, { x: 0, y: y, z: 0 });
+    strokes.push(d);
+  });
+  strokes.push(box(metal, "#9c7410", 0.038, 0.02, 0.034, 0, -0.505, 0));
+  return strokes;
+}
+
+function samuraiStrokes(kind) {   // "normal" | "shogun" | "innocent" (pale robe, no armour)
+  const hull   = figmin.brushes.MatteHull;
+  const card   = "#b98b55";
+  const face   = "#dcb57f";
+  const armor  = { normal: "#7a1c1c", shogun: "#23235e", innocent: "#ece6d8" }[kind];
+  const helmet = { normal: "#4e1010", shogun: "#d4a017", innocent: "#1a1a1a" }[kind];
+  const crest  = { normal: "#d4a017", shogun: "#fff2a8", innocent: "#1a1a1a" }[kind];
+  const black  = "#111111";
+  return [
+    box(hull, card,  0.46, 0.80, 0.05,  0,    -0.25, 0),  // body + legs
+    box(hull, "#6b4a28", 0.022, 0.34, 0.056, 0, -0.48, 0), // leg split
+    box(hull, armor, 0.40, 0.30, 0.065, 0,    -0.02, 0),  // chest plate
+    box(hull, black, 0.47, 0.05, 0.07,  0,    -0.20, 0),  // belt
+    box(hull, armor, 0.14, 0.12, 0.065, -0.28, 0.08, 0),  // shoulder L
+    box(hull, armor, 0.14, 0.12, 0.065,  0.28, 0.08, 0),  // shoulder R
+    box(hull, face,  0.24, 0.26, 0.05,  0,     0.30, 0),  // head
+    box(hull, helmet,0.34, 0.11, 0.07,  0,     0.47, 0),  // helmet
+    box(hull, crest, 0.05, 0.12, 0.03,  0,     0.58, 0),  // crest
+    box(hull, black, 0.05, 0.02, 0.07, -0.06,  0.33, 0),  // eyes (visible both sides)
+    box(hull, black, 0.05, 0.02, 0.07,  0.06,  0.33, 0),
+    box(hull, black, 0.10, 0.015,0.07,  0,     0.24, 0)   // mouth
+  ];
+}
+
+function shurikenStrokes() {
+  const metal = figmin.brushes.MetallicHull;
+  const col = "#8f99a6";
+  const t = 0.003;
+  const P = (r, ang, y) => figmin.sketch.point({ x: r * Math.cos(ang), y: y, z: r * Math.sin(ang) });
+  const strokes = [];
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2;
+    strokes.push(figmin.sketch.stroke(metal, col, 0.001, [
+      P(0.07, a, 0),
+      P(0.026, a + 0.8, t), P(0.026, a + 0.8, -t),
+      P(0.026, a - 0.8, t), P(0.026, a - 0.8, -t),
+      P(0, 0, t), P(0, 0, -t)
+    ]));
+  }
+  strokes.push(figmin.sketch.cylinderStroke(metal, "#3a3f46", 0.001, 0.014, 0.014, 0.009, 1));
+  return strokes;
+}
+
+function bombStrokes() {
+  const hull = figmin.brushes.ShinyHull;
+  return [
+    figmin.sketch.sphereStroke(hull, "#151515", 0.001, 0.12),
+    box(hull, "#555555", 0.06, 0.03, 0.06, 0, 0.125, 0),   // cap
+    box(hull, "#c9a46b", 0.012, 0.07, 0.012, 0, 0.17, 0),  // fuse
+    box(hull, "#f3e9d6", 0.03, 0.03, 0.03, -0.045, 0.03, 0.105), // eyes
+    box(hull, "#f3e9d6", 0.03, 0.03, 0.03,  0.045, 0.03, 0.105)
+  ];
+}
+
+/* =========================================================================
+   Object creation (pooled, created once)
+   ========================================================================= */
+const HIDDEN = { x: 0, y: -20, z: 0 };
+
+function buildKatana() {
+  const spawn = {
+    position: figmin.getWindowSpawnPosition(0.25, "right"),
+    rotation: figmin.getWindow().transform.rotation,
+    colliderType: figmin.ColliderType.BOX,
+    name: "DojoKatana"
+  };
+  katana = figmin.createObject(figmin.ObjectType.MODEL3D, Object.assign({
+    url: MODEL_BASE + "katana.glb",
+    targetSize: KATANA_LENGTH
+  }, spawn));
+  const makeBackup = () => (katana = figmin.createObject(figmin.ObjectType.SKETCH,
+    Object.assign({ brushStrokes: katanaStrokes() }, spawn)));
+
+  trackLoad(katana, (k) => {
+    katana = k;
+    katanaName = k.name;
+    // Locked (not grabbable) until the controllers are connected, so the trigger
+    // can't make Figmin copy it.
+    k.interactionState = figmin.InteractionState.LOCKED;
+    figmin.enableInputConnect(
+      "Samurai Dojo",
+      [
+        figmin.InputCode.SELECT_LEFT, figmin.InputCode.SELECT_RIGHT,
+        figmin.InputCode.A, figmin.InputCode.X
+      ],
+      (connected) => {
+        game.inputConnected = connected;
+        katana.interactionState = connected
+          ? figmin.InteractionState.ENABLED : figmin.InteractionState.LOCKED;
+        updateStartButton();
+        if (game.phase === "ready" || game.phase === "over") {
+          setStatus(connected
+            ? "Controllers connected. Grab the katana and press <b>Start Game</b>."
+            : "Controllers disconnected. Tap the <b>connect icon</b> to reconnect.");
+        }
+      },
+      { grabbableObjects: [k] }
+    );
+  }, "katana", makeBackup);
+}
+
+function buildSamuraiPool() {
+  const kinds = [
+    { kind: "normal",   count: NORMAL_POOL,   models: NORMAL_MODELS,   points: NORMAL_POINTS,   mass: 3 },
+    { kind: "shogun",   count: SHOGUN_POOL,   models: SHOGUN_MODELS,   points: SHOGUN_POINTS,   mass: 4 },
+    { kind: "innocent", count: INNOCENT_POOL, models: INNOCENT_MODELS, points: INNOCENT_POINTS, mass: 3 }
+  ];
+  kinds.forEach((k) => {
+    const strokes = samuraiStrokes(k.kind);
+    for (let i = 0; i < k.count; i++) buildSamurai(k, k.models[i % k.models.length], strokes);
+  });
+}
+
+function buildSamurai(k, model, strokes) {
+  const obj = figmin.createObject(figmin.ObjectType.MODEL3D, {
+    position: HIDDEN,
+    url: MODEL_BASE + model + ".glb",
+    targetSize: SAMURAI_HEIGHT * (MODEL_WIDTH_FIX[model] || 1),
+    colliderType: figmin.ColliderType.BOX
+  });
+  const rec = {
+    obj: obj, model: model, kind: k.kind, points: k.points,
+    alive: false, pending: false, fallen: false,
+    rising: false, riseT: 0, target: V.zero(), yaw: 0, physicsAt: 0,
+    removeAt: 0, lastKnock: -10, hitAt: -10,
+    halfH: SAMURAI_HEIGHT / 2, footR: 0.4   // replaced with the real size once loaded
+  };
+  samurai.push(rec);
+  const makeBackup = () => (rec.obj = figmin.createObject(figmin.ObjectType.SKETCH, {
+    position: HIDDEN,
+    brushStrokes: strokes.map((s) => figmin.sketch.cloneStroke(s)),
+    colliderType: figmin.ColliderType.BOX
+  }));
+  trackLoad(obj, (o) => {
+    rec.obj = o;
+    const size = o.transform.size;
+    if (size && size.y > 0.1) {
+      rec.halfH = size.y / 2;
+      rec.footR = Math.max(size.x, size.z) / 2;
+    }
+    o.interactionState = figmin.InteractionState.LOCKED;
+    // Add the material first with its settings, then physics
+    // (avoids touching o.physicsMaterial before it exists on the JS side).
+    o.addComponent(figmin.ComponentType.PHYSICS_MATERIAL, {
+      bounciness: 0.1,
+      staticFriction: 0.8,
+      dynamicFriction: 0.7
+    });
+    o.addComponent(figmin.ComponentType.PHYSICS, {
+      mass: k.mass,
+      drag: 0.1,
+      angularDrag: 0.3,
+      kinematic: true
+    });
+    o.active = false;
+    samuraiByOid.set(o.oid, rec);
+
+    o.collider.onCollisionEnter((hit) => {
+      // Katana collision (physics contact)
+      if (hit.objectName && hit.objectName === katanaName) {
+        knock(rec, katanaKnockDir(rec), katanaStrength());
+        return;
+      }
+      // Bumped by a samurai you hit → this fall counts too (chain reaction)
+      const other = hit.object && samuraiByOid.get(hit.object.oid);
+      if (other && game.now - other.hitAt < HIT_CREDIT_SECONDS) rec.hitAt = game.now;
+    }, ["objectName", "object"]);
+  }, k.kind === "innocent" ? "innocent" : "samurai", makeBackup);
+}
+
+function buildShurikenPool() {
+  const base = shurikenStrokes();
+  for (let i = 0; i < SHURIKEN_POOL; i++) {
+    const obj = figmin.createObject(figmin.ObjectType.SKETCH, {
+      position: HIDDEN,
+      brushStrokes: base.map((s) => figmin.sketch.cloneStroke(s)),
+      colliderType: figmin.ColliderType.SPHERE
+    });
+    const rec = { obj: obj, live: false, expire: 0, dir: { x: 0, y: 0, z: 1 } };
+    shurikens.push(rec);
+    trackLoad(obj, (o) => {
+      o.interactionState = figmin.InteractionState.LOCKED;
+      o.addComponent(figmin.ComponentType.PHYSICS, {
+        mass: 0.25,
+        drag: 0,
+        angularDrag: 0,
+        gravityStrength: 0.3,
+        maxAngularVelocity: 40,
+        kinematic: true
+      });
+      // Light streak so you can see where a shuriken flies (and what it hit)
+      o.addComponent(figmin.ComponentType.TRAIL);
+      const streak = o.trail.loadTrail("streak", figmin.brushes.Light2);
+      streak.color = "#cfe6ff";
+      streak.size = 0.025;
+      streak.lifetime = 0.3;
+      o.active = false;
+      o.collider.onCollisionEnter((hit) => {
+        if (!rec.live || !hit.object) return;
+        const target = samuraiByOid.get(hit.object.oid);
+        if (target) knock(target, rec.dir, 1.0);
+        else if (bomb.obj && hit.object.oid === bomb.obj.oid) bombHit();
+      }, ["object"]);
+    }, "shuriken");
+  }
+}
+
+function buildBomb() {
+  bomb.obj = figmin.createObject(figmin.ObjectType.SKETCH, {
+    position: HIDDEN,
+    brushStrokes: bombStrokes(),
+    colliderType: figmin.ColliderType.SPHERE
+  });
+  trackLoad(bomb.obj, (o) => {
+    o.interactionState = figmin.InteractionState.LOCKED;
+    o.addComponent(figmin.ComponentType.TRAIL);
+    const spark = o.trail.loadTrail("spark", figmin.brushes.Embers);
+    spark.color = "#ffaa33";
+    spark.size = 0.02;
+    spark.lifetime = 0.6;
+    spark.baseVelocity = { x: 0, y: 0.25, z: 0 };
+    spark.localPosition = { x: 0, y: 0.21, z: 0 };
+    o.addComponent(figmin.ComponentType.LIGHT, {
+      type: figmin.lights.LightType.POINT,
+      color: "#ff3300",
+      range: 1.2,
+      effect: figmin.lights.LightEffect.PULSE
+    });
+    o.active = false;
+  }, "bomb");
+}
+
+function buildTexts() {
+  const winRot = figmin.getWindow().transform.rotation;
+
+  scoreboard = figmin.createObject(figmin.ObjectType.TEXT3D, {
+    position: figmin.getWindowSpawnPosition(0.12, "up"),
+    rotation: winRot,
+    text: "SAMURAI DOJO",
+    font: "classic",
+    size: 0.05,
+    depth: 0.012,
+    frontColor: "#f3e9d6",
+    sideColor: "#b3261e",
+    material: "metallic"
+  });
+  trackLoad(scoreboard, (o) => { o.interactionState = figmin.InteractionState.LOCKED; }, "scoreboard");
+
+  banner = figmin.createObject(figmin.ObjectType.TEXT3D, {
+    position: HIDDEN,
+    rotation: winRot,
+    text: "HAJIME!",
+    font: "classic",
+    size: 0.14,
+    depth: 0.03,
+    frontColor: "#ffd27a",
+    sideColor: "#7a1c1c",
+    material: "fire"
+  });
+  trackLoad(banner, (o) => {
+    o.interactionState = figmin.InteractionState.LOCKED;
+    o.active = false;
+  }, "banner");
+
+  [[NORMAL_POINTS, 4], [SHOGUN_POINTS, 2], [INNOCENT_POINTS, 2]].forEach(([pts, count]) => {
+    popups[pts] = [];
+    for (let i = 0; i < count; i++) {
+      const obj = figmin.createObject(figmin.ObjectType.TEXT3D, {
+        position: HIDDEN,
+        rotation: winRot,
+        text: (pts > 0 ? "+" : "") + pts,
+        font: "classic",
+        size: pts > 1 ? 0.12 : 0.09,
+        depth: 0.02,
+        frontColor: pts > 1 ? "#ffd700" : pts < 0 ? "#ff4a3d" : "#ffffff",
+        sideColor: pts > 1 ? "#8a5a00" : pts < 0 ? "#3a0a08" : "#b3261e",
+        material: pts > 1 ? "diamond" : "metallic"
+      });
+      const rec = { obj: obj, busy: false, until: 0 };
+      popups[pts].push(rec);
+      trackLoad(obj, (o) => {
+        o.interactionState = figmin.InteractionState.LOCKED;
+        o.active = false;
+      }, "points-text");
+    }
+  });
+}
+
+function setupHands() {
+  const me = figmin.getLocalPlayer();
+  const L = figmin.getPlayerBodypart(me, figmin.BodypartType.LEFT_HAND);
+  const R = figmin.getPlayerBodypart(me, figmin.BodypartType.RIGHT_HAND);
+  L.onStart((h) => { hands.left = h; });
+  R.onStart((h) => { hands.right = h; });
+}
+
+/* =========================================================================
+   Game flow
+   ========================================================================= */
+function cameraYaw() {
+  const f = camera.transform.forward;
+  return Math.atan2(f.x, f.z) * DEG;
+}
+
+function startGame() {
+  if (game.phase === "loading" || game.phase === "countdown" || game.phase === "playing") return;
+  if (!game.inputConnected) {
+    setStatus("First tap the <b>controller connect icon</b> on this window.");
+    return;
+  }
+
+  clearField();
+  game.arena.center = V.flat(camera.transform.position);
+  game.arena.yaw = cameraYaw();
+  game.score = 0;
+  game.elapsed = 0;
+  game.timeLeft = GAME_SECONDS;
+  game.spawnTimer = 0;
+  game.bombTimer = rand(BOMB_EVERY_MIN, BOMB_EVERY_MAX);
+  game.lastShownSecond = -1;
+  game.lastShownScore = -1;
+
+  game.phase = "countdown";
+  game.countdownStep = 0;
+  game.countdownTimer = 0;
+  showBanner("3");
+
+  ui.start.disabled = true;
+  ui.start.textContent = "Fight!";
+  setStatus("Get ready&hellip;");
+  updateHud();
+}
+
+function beginPlaying() {
+  game.phase = "playing";
+  setStatus("Topple them! Trigger throws a shuriken.");
+  for (let i = 0; i < START_ALIVE; i++) spawnSamurai();
+}
+
+function endGame(reason) {
+  if (game.phase !== "playing") return;
+  game.phase = "over";
+
+  const newBest = game.score > game.best;
+  if (newBest) {
+    game.best = game.score;
+    figmin.saveState(JSON.stringify({ best: game.best }));
+  }
+
+  hideBomb();
+  samurai.forEach((rec) => {
+    if (rec.alive && !rec.fallen) {
+      // Freeze survivors in place for a moment of shame
+      rec.obj.physics.kinematic = true;
+    }
+  });
+  setTimeout(() => { if (game.phase === "over") clearSamurai(); }, 2500);
+
+  const head = reason === "bomb" ? "BOOM!" : "TIME!";
+  showBanner(head + "  " + game.score + " PTS");
+  setTimeout(() => { if (game.phase === "over") hideBanner(); }, 4000);
+
+  updateStartButton();
+  setStatus((reason === "bomb" ? "&#x1F4A5; You hit a bomb! " : "Time's up! ") +
+    "Final score: <b>" + game.score + "</b>" + (newBest ? " &mdash; <b>new best!</b>" : ""));
+  updateHud();
+  updateScoreboard(true);
+}
+
+function clearSamurai() {
+  samurai.forEach(hideSamurai);
+}
+
+function clearField() {
+  clearSamurai();
+  shurikens.forEach(hideShuriken);
+  hideBomb();
+  Object.keys(popups).forEach((pts) => popups[pts].forEach((p) => {
+    p.busy = false;
+    if (p.obj.status.state === figmin.ObjectState.READY) p.obj.active = false;
+  }));
+}
+
+/* =========================================================================
+   Samurai
+   ========================================================================= */
+function aliveCount() {
+  return samurai.reduce((n, r) => n + (r.alive && !r.fallen ? 1 : 0), 0);
+}
+
+function spawnSamurai() {
+  const roll = Math.random();
+  const want = roll < INNOCENT_CHANCE ? "innocent"
+             : roll < INNOCENT_CHANCE + SHOGUN_CHANCE ? "shogun" : "normal";
+  const free = (r) => !r.alive && !r.pending && r.obj.status.state === figmin.ObjectState.READY;
+  const rec = samurai.find((r) => free(r) && r.kind === want) ||
+              samurai.find((r) => free(r) && r.kind !== "innocent");
+  if (!rec) return;
+
+  // Pick a spot in front of the player, not too close to other samurai
+  let pos = null;
+  for (let attempt = 0; attempt < 8 && !pos; attempt++) {
+    const yaw = (game.arena.yaw + rand(-SPAWN_ARC_DEG, SPAWN_ARC_DEG)) / DEG;
+    const dist = rand(SPAWN_MIN_DIST, SPAWN_MAX_DIST);
+    const p = {
+      x: game.arena.center.x + Math.sin(yaw) * dist,
+      y: rec.halfH + 0.02,
+      z: game.arena.center.z + Math.cos(yaw) * dist
+    };
+    // Keep colliders apart (the models are wide: arms, spears, axes)
+    const crowded = samurai.some((o) => o !== rec && (o.alive || o.pending) &&
+      V.len(V.flat(V.sub(o.pending ? o.target : o.obj.transform.position, p))) < o.footR + rec.footR);
+    if (!crowded) pos = p;
+  }
+  if (!pos) return;
+
+  // Ask the room (walls, furniture, real floor) whether the spot is free.
+  // Spawning inside a sofa or wall makes physics shoot the samurai out.
+  rec.pending = true;
+  rec.target = pos;
+  checkSpawnSpot(rec, pos, (ok, floorY) => {
+    rec.pending = false;
+    if (!ok) {
+      console.warn("Spawn spot blocked by the room, trying elsewhere next time");
+      return;
+    }
+    if (game.phase !== "playing") return;
+    placeSamurai(rec, { x: pos.x, y: floorY + rec.halfH + 0.02, z: pos.z });
+  });
+}
+
+/* Two probes against the room's surfaces (results arrive next frame):
+   1) a fat ray from the player to the spot at waist height → wall / furniture in the way or at the spot
+   2) a fat ray down onto the spot → the real floor height (or a table / bed = blocked) */
+function checkSpawnSpot(rec, pos, done) {
+  const eye = camera.transform.position;
+  const from = { x: eye.x, y: 0.9, z: eye.z };
+  const to = { x: pos.x, y: 0.9, z: pos.z };
+  const dir = V.sub(to, from);
+  const surface = [figmin.Layers.SURFACE];
+  Promise.all([
+    figmin.raycastSphere({ origin: from, direction: dir, radius: 0.2,
+      maxDistance: V.len(dir) + rec.footR, layers: surface }),
+    figmin.raycastSphere({ origin: { x: pos.x, y: 1.8, z: pos.z }, direction: { x: 0, y: -1, z: 0 },
+      radius: Math.min(0.35, rec.footR * 0.6), maxDistance: 2.5, layers: surface })
+  ]).then(([wall, floor]) => {
+    const floorY = floor ? floor.point.y : 0;
+    done(!wall && Math.abs(floorY) < 0.2, Math.abs(floorY) < 0.2 ? floorY : 0);
+  }).catch((e) => {
+    console.warn("Spawn check failed (" + (e && e.message ? e.message : e) + "), spawning anyway");
+    done(true, 0);
+  });
+}
+
+function placeSamurai(rec, pos) {
+  const cam = camera.transform.position;
+  rec.yaw = Math.atan2(cam.x - pos.x, cam.z - pos.z) * DEG;
+  rec.target = pos;
+  rec.alive = true;
+  rec.fallen = false;
+  rec.rising = true;
+  rec.riseT = 0;
+  rec.lastKnock = -10;
+  rec.hitAt = -10;
+
+  const o = rec.obj;
+  o.physics.velocity = V.zero();
+  o.physics.angularVelocity = V.zero();
+  o.physics.kinematic = true;
+  o.transform.rotation = { x: 0, y: rec.yaw, z: 0 };   // model front (+Z) faces the player
+  o.transform.position = { x: pos.x, y: pos.y - riseDepth(rec), z: pos.z };
+  o.active = true;
+}
+
+/* How far below its standing spot a samurai starts (fully under the floor) */
+function riseDepth(rec) { return rec.halfH * 2 + 0.1; }
+
+function hideSamurai(rec) {
+  if (rec.obj.status.state !== figmin.ObjectState.READY) return;
+  rec.alive = false;
+  rec.pending = false;
+  rec.fallen = false;
+  rec.rising = false;
+  rec.obj.physics.kinematic = true;
+  rec.obj.active = false;
+  rec.obj.transform.position = HIDDEN;
+}
+
+function updateSamurai(dt) {
+  for (const rec of samurai) {
+    if (!rec.alive) continue;
+    const o = rec.obj;
+
+    // Pop up out of the floor
+    if (rec.rising) {
+      rec.riseT = Math.min(1, rec.riseT + dt / 0.35);
+      const e = 1 - Math.pow(1 - rec.riseT, 3);
+      o.transform.position = { x: rec.target.x, y: rec.target.y - riseDepth(rec) * (1 - e), z: rec.target.z };
+      if (rec.riseT >= 1) {
+        rec.rising = false;
+        rec.physicsAt = game.now;
+        o.physics.kinematic = false;
+        o.physics.sleeping = false;
+      }
+      continue;
+    }
+
+    if (rec.fallen) {
+      if (game.now >= rec.removeAt) hideSamurai(rec);
+      continue;
+    }
+
+    const wasHit = game.now - rec.hitAt < HIT_CREDIT_SECONDS;
+
+    // Shot away right after rising without being hit = the room pushed it out
+    // (overlapping a wall / furniture / another samurai). Remove it quietly.
+    if (!wasHit && game.now - rec.physicsAt < 0.6 && V.len(o.physics.velocity) > EJECT_SPEED) {
+      console.warn("A " + rec.model + " was pushed out by something in the room; removed (no points)");
+      hideSamurai(rec);
+      continue;
+    }
+
+    const up = o.transform.up;
+    const p = o.transform.position;
+    const tipped = up.y < FALL_UP_Y || p.y < rec.target.y - 0.3;
+    const lost = p.y < -3 || V.len(V.flat(V.sub(p, game.arena.center))) > 12;
+
+    if (tipped || lost) {
+      rec.fallen = true;
+      rec.removeAt = game.now + 1.6;
+      if (game.phase === "playing" && wasHit) {
+        game.score += rec.points;
+        showPopup(rec.points, p);
+        updateHud();
+      } else if (!wasHit) {
+        console.warn("A " + rec.model + " fell over without being hit; no points");
+      }
+      continue;
+    }
+
+    // Katana sweep check (backup for physics contacts)
+    checkKatanaVsSamurai(rec);
+  }
+}
+
+function knock(rec, dir, strength) {
+  if (!rec.alive || rec.fallen || rec.rising) return;
+  rec.hitAt = game.now;
+  if (game.now - rec.lastKnock < 0.25) return;
+  rec.lastKnock = game.now;
+
+  let d = V.norm(V.flat(dir));
+  if (V.len(d) < 0.5) {
+    d = V.norm(V.flat(V.sub(rec.obj.transform.position, camera.transform.position)));
+  }
+  const s = strength;
+  rec.obj.physics.sleeping = false;
+  rec.obj.physics.velocity = { x: d.x * 1.6 * s, y: 0.6 * s, z: d.z * 1.6 * s };
+  // Spin around (up x d) so the top tips over in the push direction
+  rec.obj.physics.angularVelocity = { x: d.z * 4 * s, y: rand(-1, 1), z: -d.x * 4 * s };
+}
+
+/* =========================================================================
+   Katana
+   ========================================================================= */
+function katanaSegment() {
+  const t = katana.transform;
+  const len = (t.size && t.size.y > 0.1) ? t.size.y : KATANA_LENGTH;
+  return {
+    base: V.add(t.position, V.scale(t.up, BLADE_BASE_FRAC * len)),
+    tip:  V.add(t.position, V.scale(t.up, BLADE_TIP_FRAC * len))
+  };
+}
+
+function updateKatanaMotion(dt) {
+  if (!katana || katana.status.state !== figmin.ObjectState.READY || dt <= 0) return;
+  const tip = katanaSegment().tip;
+  if (prevTip) tipVel = V.scale(V.sub(tip, prevTip), 1 / dt);
+  prevTip = tip;
+}
+
+function katanaSpeed() { return V.len(tipVel); }
+function katanaStrength() { return clamp(katanaSpeed() / 3, 0.9, 1.8); }
+
+function katanaKnockDir(rec) {
+  if (katanaSpeed() > 0.3) return tipVel;
+  return V.sub(rec.obj.transform.position, katana.transform.position);
+}
+
+function checkKatanaVsSamurai(rec) {
+  const k = katanaSegment();
+  const t = rec.obj.transform;
+  const axis = rec.halfH * SAMURAI_AXIS_FRAC;
+  const a = V.add(t.position, V.scale(t.up, -axis));
+  const b = V.add(t.position, V.scale(t.up,  axis));
+  if (segSegDist(k.base, k.tip, a, b) < SAMURAI_RADIUS) {
+    rec.hitAt = game.now;   // even a slow push with the blade counts as your hit
+    if (katanaSpeed() >= KATANA_MIN_SPEED) knock(rec, katanaKnockDir(rec), katanaStrength());
+  }
+}
+
+/* =========================================================================
+   Shuriken
+   ========================================================================= */
+function throwShuriken(side) {
+  const hand = hands[side];
+  if (!hand || !hand.bodypart.tracked) return;
+  if (game.now - lastThrow[side] < THROW_COOLDOWN) return;
+  lastThrow[side] = game.now;
+
+  let rec = shurikens.find((s) => !s.live && s.obj.status.state === figmin.ObjectState.READY);
+  if (!rec) {
+    rec = shurikens.filter((s) => s.obj.status.state === figmin.ObjectState.READY)
+                   .sort((a, b) => a.expire - b.expire)[0];
+  }
+  if (!rec) return;
+
+  const bp = hand.bodypart;
+  const fwd = bp.rayForward;
+  const up = bp.rayUp;
+  const o = rec.obj;
+
+  o.active = false;           // if recycling a flying one, don't drag it across the room
+  o.physics.kinematic = true;
+  o.transform.position = V.add(bp.rayPosition, V.scale(fwd, 0.12));
+  o.transform.rotationq = figmin.lookRotationq(fwd, up);
+  o.active = true;
+  o.physics.kinematic = false;
+  o.physics.velocity = V.scale(fwd, SHURIKEN_SPEED);
+  o.physics.angularVelocity = V.scale(up, 30);
+
+  rec.live = true;
+  rec.dir = fwd;
+  rec.expire = game.now + SHURIKEN_LIFETIME;
+}
+
+function hideShuriken(rec) {
+  if (rec.obj.status.state !== figmin.ObjectState.READY) return;
+  rec.live = false;
+  rec.obj.physics.kinematic = true;
+  rec.obj.active = false;
+  rec.obj.transform.position = HIDDEN;
+}
+
+function updateShurikens() {
+  for (const s of shurikens) {
+    if (s.live && game.now >= s.expire) hideShuriken(s);
+  }
+}
+
+/* =========================================================================
+   Bomb (hitting it ends the game)
+   ========================================================================= */
+function spawnBomb() {
+  if (!bomb.obj || bomb.obj.status.state !== figmin.ObjectState.READY) return;
+  const yaw = (game.arena.yaw + rand(-SPAWN_ARC_DEG, SPAWN_ARC_DEG)) / DEG;
+  const dist = rand(1.4, 2.4);
+  bomb.base = {
+    x: game.arena.center.x + Math.sin(yaw) * dist,
+    y: rand(1.0, 1.4),
+    z: game.arena.center.z + Math.cos(yaw) * dist
+  };
+  bomb.phase = 0;
+  bomb.live = true;
+  bomb.expire = game.now + BOMB_LIFETIME;
+  bomb.obj.transform.position = bomb.base;
+  bomb.obj.transform.rotation = { x: 0, y: Math.atan2(
+    camera.transform.position.x - bomb.base.x,
+    camera.transform.position.z - bomb.base.z) * DEG, z: 0 };
+  bomb.obj.active = true;
+}
+
+function hideBomb() {
+  if (!bomb.obj || bomb.obj.status.state !== figmin.ObjectState.READY) return;
+  bomb.live = false;
+  bomb.obj.active = false;
+  bomb.obj.transform.position = HIDDEN;
+}
+
+function bombHit() {
+  if (!bomb.live || game.phase !== "playing" || !ui.bombs.checked) return;
+  endGame("bomb");
+}
+
+function updateBomb(dt) {
+  if (game.phase !== "playing") return;
+
+  if (!bomb.live) {
+    if (!ui.bombs.checked) return;
+    game.bombTimer -= dt;
+    if (game.bombTimer <= 0) {
+      spawnBomb();
+      game.bombTimer = rand(BOMB_EVERY_MIN, BOMB_EVERY_MAX);
+    }
+    return;
+  }
+
+  if (game.now >= bomb.expire || !ui.bombs.checked) { hideBomb(); return; }
+
+  // Gentle bob (keeps the fuse trail alive)
+  bomb.phase += dt * 2.5;
+  bomb.obj.transform.position = {
+    x: bomb.base.x, y: bomb.base.y + Math.sin(bomb.phase) * 0.05, z: bomb.base.z
+  };
+
+  // Katana touching the bomb
+  if (katanaSpeed() > 0.3) {
+    const k = katanaSegment();
+    const c = bomb.obj.transform.position;
+    if (segSegDist(k.base, k.tip, c, c) < 0.16) bombHit();
+  }
+}
+
+/* =========================================================================
+   Floating texts
+   ========================================================================= */
+function showBanner(text) {
+  if (!banner || banner.status.state === figmin.ObjectState.DESTROYED) return;
+  const cam = camera.transform;
+  const f = V.norm(V.flat(cam.forward));
+  banner.transform.position = {
+    x: cam.position.x + f.x * 1.8,
+    y: cam.position.y + 0.25,
+    z: cam.position.z + f.z * 1.8
+  };
+  banner.transform.rotation = { x: 0, y: cameraYaw(), z: 0 };
+  banner.text3d.text = text;
+  banner.active = true;
+}
+
+function hideBanner() {
+  if (banner && banner.status.state !== figmin.ObjectState.DESTROYED) banner.active = false;
+}
+
+function showPopup(points, pos) {
+  const pool = popups[points] || popups[NORMAL_POINTS];
+  const rec = pool.find((p) => !p.busy) || pool[0];
+  if (!rec || rec.obj.status.state === figmin.ObjectState.DESTROYED) return;
+  rec.busy = true;
+  rec.until = game.now + 0.9;
+  rec.obj.transform.position = { x: pos.x, y: pos.y + 0.6, z: pos.z };
+  rec.obj.transform.rotation = { x: 0, y: cameraYaw(), z: 0 };
+  rec.obj.active = true;
+}
+
+function updatePopups(dt) {
+  for (const pts of Object.keys(popups)) {
+    for (const p of popups[pts]) {
+      if (!p.busy) continue;
+      if (game.now >= p.until) { p.busy = false; p.obj.active = false; continue; }
+      const pos = p.obj.transform.position;
+      p.obj.transform.position = { x: pos.x, y: pos.y + 0.5 * dt, z: pos.z };
+    }
+  }
+}
+
+/* =========================================================================
+   HUD
+   ========================================================================= */
+function updateHud() {
+  const secs = Math.ceil(game.timeLeft);
+  ui.time.textContent = secs;
+  ui.time.classList.toggle("low", game.phase === "playing" && secs <= 10);
+  ui.score.textContent = game.score;
+  ui.best.textContent = game.best;
+}
+
+function updateScoreboard(force) {
+  if (!scoreboard || scoreboard.status.state === figmin.ObjectState.DESTROYED) return;
+  const secs = Math.ceil(game.timeLeft);
+  if (!force && secs === game.lastShownSecond && game.score === game.lastShownScore) return;
+  game.lastShownSecond = secs;
+  game.lastShownScore = game.score;
+  if (game.phase === "playing" || game.phase === "over") {
+    scoreboard.text3d.text = "SCORE " + game.score + "   TIME " + secs;
+  } else {
+    scoreboard.text3d.text = "SAMURAI DOJO   BEST " + game.best;
+  }
+}
+
+/* =========================================================================
+   Main loop
+   ========================================================================= */
+function tick(dt) {
+  game.now += dt;
+  if (game.phase === "loading") {
+    if (Math.floor(game.now) !== Math.floor(game.now - dt)) checkLoadingStuck();
+    return;
+  }
+
+  updateKatanaMotion(dt);
+
+  // Throwing works any time (practice before the round too)
+  if (figmin.getInputDown(figmin.InputCode.SELECT_RIGHT) || figmin.getInputDown(figmin.InputCode.A)) {
+    throwShuriken("right");
+  }
+  if (figmin.getInputDown(figmin.InputCode.SELECT_LEFT) || figmin.getInputDown(figmin.InputCode.X)) {
+    throwShuriken("left");
+  }
+
+  updateShurikens();
+  updateSamurai(dt);
+  updatePopups(dt);
+
+  if (game.phase === "countdown") {
+    game.countdownTimer += dt;
+    if (game.countdownTimer >= 0.75) {
+      game.countdownTimer = 0;
+      game.countdownStep++;
+      const labels = ["3", "2", "1", "HAJIME!"];
+      if (game.countdownStep < labels.length) showBanner(labels[game.countdownStep]);
+      if (game.countdownStep === 3) beginPlaying();
+    }
+  }
+
+  if (game.phase === "playing") {
+    // Hide the "HAJIME!" banner shortly after the round starts
+    if (game.countdownStep === 3 && game.elapsed > 0.8) {
+      hideBanner();
+      game.countdownStep = 4;
+    }
+
+    game.elapsed += dt;
+    game.timeLeft = Math.max(0, GAME_SECONDS - game.elapsed);
+
+    const cap = Math.min(NORMAL_POOL + SHOGUN_POOL,
+      START_ALIVE + Math.floor(game.elapsed / ALIVE_RAMP_SECONDS));
+    game.spawnTimer -= dt;
+    if (game.spawnTimer <= 0 && aliveCount() < cap) {
+      spawnSamurai();
+      game.spawnTimer = SPAWN_INTERVAL;
+    }
+
+    updateBomb(dt);
+    updateHud();
+    updateScoreboard(false);
+
+    if (game.timeLeft <= 0) endGame("time");
+  }
+}
+</script>
+</body>
+</html>
