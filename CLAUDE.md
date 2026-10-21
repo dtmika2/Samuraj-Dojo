@@ -13,6 +13,7 @@ Gameplay:
 - A round lasts **60 seconds** (3-2-1-"HAJIME!" countdown first).
 - A **black bomb** appears now and then; hitting it (sword or shuriken) ends the game early ("BOOM!"). Can be disabled with a checkbox.
 - Best score is persisted with `figmin.saveState` / `loadState`.
+- Background music plays from the countdown until the round ends.
 
 ## The user
 
@@ -74,7 +75,7 @@ Sections, in order:
 - v1 got stuck at "Preparing the dojo… 18/26". 26 − 18 = 8 = the samurai pool, so the samurai `onStart` setup most likely threw. Suspected cause: setting `o.physicsMaterial.*` right after adding physics, before that component existed on the JS side.
 - v2 (this `index.html`) fixes that by adding `PHYSICS_MATERIAL` (with params) **before** `PHYSICS`, and makes loading error-tolerant with a per-group report. **This fix is unverified** — first thing to do is have the user load it and report the status text.
 - Physics tuning (knock strength, masses, fall threshold, spawn distances) is untested guesswork; expect to iterate with the user.
-- No audio yet (no sound files available).
+- Music: `audio/final-taiko-clash.mp3` (user's track, 3:48, MP3) on an AUDIO component of the scoreboard (`setupMusic`), non-spatial, no loop, volume `MUSIC_VOLUME`; `startMusic()` (stop + play = from the start) in `startGame`, `stopMusic()` in `endGame` (time or bomb). Loaded from `MUSIC_URL` on Pages; the game works if it fails (console error). No sound effects yet.
 - **3D models are wired in (v3, 2026-10-21), untested on device.** Meshy models simplified to ~30k triangles (katana ~10.7k), plain JPEG textures, no Draco/WebP; see `models/README.md`. They load from `MODEL_BASE` on GitHub Pages, so they only work after a push with Pages enabled. Unknowns to check on the headset: models actually load (else status shows "using backup shape"), model front faces the player (assumed +Z, verified only in offline renders), BOX colliders of wide models topple sensibly, overall frame rate with 8 models.
 - The script was smoke-tested in Node against a fake `figmin` mock (load, backup path, round, hits, bomb, not-connected, blocked spawn spot, ejection, self-fall) — this catches JS/logic errors only, not engine behaviour.
 - User report on v2 (before these fixes): "some samurais were flying out on their own" and the katana "cloned itself and stayed in place" when grabbed. Clone = Figmin trigger-duplicate while not connected (fixed by locking). Flying: root cause not confirmed; most likely spawning inside room geometry (furniture/walls/floor above y=0) → physics depenetration. v3 adds room probes, ejection removal, and hit credit. If it still happens, ask for Console lines containing "pushed out" / "fell over without being hit" / "Spawn spot blocked".

@@ -29,6 +29,7 @@ A 60-second mixed-reality physics game for **Figmin XR**. Grab a katana, throw s
 
 - `index.html` — the whole game (single self-contained page)
 - `models/game/` — the 3D models (GLB) the game loads (see `models/README.md`)
+- `audio/final-taiko-clash.mp3` — background music, plays from the countdown until the round ends
 - `CLAUDE.md` — project notes for continuing development with Claude Code
 
 Built with the [Figmin XR Scripting API](https://www.figmin.com/api/documentation.html).

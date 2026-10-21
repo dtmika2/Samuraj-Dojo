@@ -157,7 +157,10 @@ const BOMB_LIFETIME      = 6;     // seconds a bomb stays
 
 /* 3D models (models/game/ in the repo). Figmin may embed this page when it is
    deployed, so the models are loaded from the full GitHub Pages address. */
-const MODEL_BASE     = "https://dtmika2.github.io/Samuraj-Dojo/models/game/";
+const SITE_BASE      = "https://dtmika2.github.io/Samuraj-Dojo/";
+const MODEL_BASE     = SITE_BASE + "models/game/";
+const MUSIC_URL      = SITE_BASE + "audio/final-taiko-clash.mp3";  // plays from the countdown until the round ends
+const MUSIC_VOLUME   = 0.6;   // 0–1
 const SAMURAI_HEIGHT = 1.4;   // meters, how tall the samurai stand
 const KATANA_LENGTH  = 1.0;   // meters, pommel to tip
 const NORMAL_MODELS   = ["samurai"];                           // 1 point
@@ -258,6 +261,7 @@ let katana = null;
 let katanaName = "";
 let scoreboard = null;
 let banner = null;
+let music = null;                 // audio clip on the scoreboard object
 const samurai = [];               // { obj, kind, points, alive, fallen, rising, ... }
 const samuraiByOid = new Map();
 const shurikens = [];             // { obj, state: idle|floating|held|thrown, live, expire, dir, ... }
@@ -706,7 +710,10 @@ function buildTexts() {
     sideColor: "#b3261e",
     material: "metallic"
   });
-  trackLoad(scoreboard, (o) => { o.interactionState = figmin.InteractionState.LOCKED; }, "scoreboard");
+  trackLoad(scoreboard, (o) => {
+    o.interactionState = figmin.InteractionState.LOCKED;
+    setupMusic(o);
+  }, "scoreboard");
 
   banner = figmin.createObject(figmin.ObjectType.TEXT3D, {
     position: HIDDEN,
@@ -746,6 +753,35 @@ function buildTexts() {
       }, "points-text");
     }
   });
+}
+
+/* Background music lives on the scoreboard (any object can carry audio).
+   Not spatial: same volume wherever you stand. The game works without it. */
+function setupMusic(host) {
+  try {
+    host.addComponent(figmin.ComponentType.AUDIO);
+    music = host.audio.loadClip("music", MUSIC_URL, (ok, duration) => {
+      if (ok) console.log("Music loaded (" + Math.round(duration) + " s)");
+      else console.error("Music failed to load: " + MUSIC_URL);
+    });
+    music.playing = false;   // clips autoplay when loaded unless told not to
+    music.loop = false;
+    music.spatialize = false;
+    music.volume = MUSIC_VOLUME;
+  } catch (e) {
+    music = null;
+    console.error("Music setup failed: " + (e && e.message ? e.message : e));
+  }
+}
+
+function startMusic() {
+  if (!music) return;
+  music.stop();   // back to the beginning
+  music.play();
+}
+
+function stopMusic() {
+  if (music) music.stop();
 }
 
 /* Figmin tells each hand when it grabs or lets go of something: that's how we
@@ -796,6 +832,7 @@ function startGame() {
   game.countdownStep = 0;
   game.countdownTimer = 0;
   showBanner("3");
+  startMusic();
 
   ui.start.disabled = true;
   ui.start.textContent = "Fight!";
@@ -812,6 +849,7 @@ function beginPlaying() {
 function endGame(reason) {
   if (game.phase !== "playing") return;
   game.phase = "over";
+  stopMusic();
 
   const newBest = game.score > game.best;
   if (newBest) {
