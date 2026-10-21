@@ -168,7 +168,9 @@ const MODEL_WIDTH_FIX = { "samurai-spear": 1.105 };  // largest side / height
 
 /* Samurai hit volume (scaled from each samurai's real size after loading) */
 const SAMURAI_AXIS_FRAC = 0.75;  // hit axis half-length, as a fraction of half the height
-const SAMURAI_RADIUS    = 0.3;   // hit radius around that axis (m)
+const SAMURAI_HIT_FRAC  = 0.6;   // hit radius around that axis, as a fraction of half the body's slimmer side
+const SAMURAI_HIT_MIN   = 0.10;  // hit radius limits (m)
+const SAMURAI_HIT_MAX   = 0.22;
 
 /* Katana blade, as fractions of the katana's length from its center (blade points along +Y) */
 const BLADE_BASE_FRAC = -0.21;   // guard
@@ -500,7 +502,9 @@ function buildKatana() {
   const spawn = {
     position: figmin.getWindowSpawnPosition(0.25, "right"),
     rotation: figmin.getWindow().transform.rotation,
-    colliderType: figmin.ColliderType.BOX,
+    // EXACT = follows the real blade shape (a box around a curved katana is ~10 cm
+    // thick everywhere). Allowed because the katana has no physics component.
+    colliderType: figmin.ColliderType.EXACT,
     name: "DojoKatana"
   };
   katana = figmin.createObject(figmin.ObjectType.MODEL3D, Object.assign({
@@ -565,14 +569,17 @@ function buildSamurai(k, model, strokes) {
     position: HIDDEN,
     url: MODEL_BASE + model + ".glb",
     targetSize: SAMURAI_HEIGHT * (MODEL_WIDTH_FIX[model] || 1),
-    colliderType: figmin.ColliderType.BOX
+    // Convex shape around the figure: much tighter than a box around
+    // outstretched arms, spears and banners, and still works with physics.
+    colliderType: figmin.ColliderType.APPROXIMATE
   });
   const rec = {
     obj: obj, model: model, kind: k.kind, points: k.points,
     alive: false, pending: false, fallen: false,
     rising: false, riseT: 0, target: V.zero(), yaw: 0, physicsAt: 0,
     removeAt: 0, lastKnock: -10, hitAt: -10,
-    halfH: SAMURAI_HEIGHT / 2, footR: 0.4   // replaced with the real size once loaded
+    // replaced with the real size once loaded
+    halfH: SAMURAI_HEIGHT / 2, footR: 0.4, hitR: 0.15
   };
   samurai.push(rec);
   const makeBackup = () => (rec.obj = figmin.createObject(figmin.ObjectType.SKETCH, {
@@ -586,6 +593,7 @@ function buildSamurai(k, model, strokes) {
     if (size && size.y > 0.1) {
       rec.halfH = size.y / 2;
       rec.footR = Math.max(size.x, size.z) / 2;
+      rec.hitR = clamp(Math.min(size.x, size.z) / 2 * SAMURAI_HIT_FRAC, SAMURAI_HIT_MIN, SAMURAI_HIT_MAX);
     }
     o.interactionState = figmin.InteractionState.LOCKED;
     // Add the material first with its settings, then physics
@@ -1103,7 +1111,7 @@ function checkKatanaVsSamurai(rec) {
   const axis = rec.halfH * SAMURAI_AXIS_FRAC;
   const a = V.add(t.position, V.scale(t.up, -axis));
   const b = V.add(t.position, V.scale(t.up,  axis));
-  if (segSegDist(k.base, k.tip, a, b) < SAMURAI_RADIUS) {
+  if (segSegDist(k.base, k.tip, a, b) < rec.hitR) {
     rec.hitAt = game.now;   // even a slow push with the blade counts as your hit
     if (katanaSpeed() >= KATANA_MIN_SPEED) knock(rec, katanaKnockDir(rec), katanaStrength());
   }
