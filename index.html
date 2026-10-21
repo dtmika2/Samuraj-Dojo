@@ -108,7 +108,7 @@
   <ol class="howto">
     <li>Tap the <b>controller connect icon</b> on this window first (until then the katana is locked &mdash; otherwise the trigger would make copies of it).</li>
     <li><b>Grab the katana</b> floating next to this window and swing it.</li>
-    <li>Press a <b>trigger</b> (or A / X) to throw a <b>shuriken</b> from that hand.</li>
+    <li>Every few seconds a <b>shuriken</b> floats up near you. Grab it with the <b>grip button</b> (middle finger) and throw it with a real swing &mdash; let go to release.</li>
     <li>Cardboard samurai = <b>1 point</b>. Colourful armoured shogun = <b>3 points</b>.</li>
     <li>Spare the <b>monk</b> and the <b>geisha</b> &mdash; toppling one costs <b>2 points</b>.</li>
     <li>Don't hit the <b>black bomb</b> &mdash; it ends the game instantly.</li>
@@ -140,9 +140,14 @@ const SPAWN_MAX_DIST     = 3.0;
 const SPAWN_ARC_DEG      = 55;    // +/- degrees from where you faced at start
 const FALL_UP_Y          = 0.45;  // tipped when up-vector y drops below this
 const SHURIKEN_POOL      = 8;
-const SHURIKEN_SPEED     = 14;    // m/s
-const SHURIKEN_LIFETIME  = 3.5;   // seconds before it disappears
-const THROW_COOLDOWN     = 0.25;  // seconds per hand
+const SHURIKEN_EVERY     = 5;     // seconds between new floating shurikens
+const SHURIKEN_MAX_FLOAT = 3;     // max shurikens floating and waiting to be grabbed
+const SHURIKEN_SCALE     = 1.4;   // bigger than life so it's easy to grab
+const SHURIKEN_REACH     = [0.45, 0.75]; // meters from your head where they appear (arm's reach)
+const THROW_BOOST        = 1.5;   // multiplies your hand speed at release (VR throws feel weak)
+const THROW_MIN_SPEED    = 1.0;   // m/s; slower than this = just dropped
+const THROW_MAX_SPEED    = 20;    // m/s
+const SHURIKEN_LIFETIME  = 3.5;   // seconds a thrown shuriken stays before it disappears
 const KATANA_MIN_SPEED   = 1.0;   // blade-tip speed (m/s) needed to knock
 const BOMB_EVERY_MIN     = 9;     // seconds between bombs (random range)
 const BOMB_EVERY_MAX     = 14;
@@ -232,6 +237,7 @@ const game = {
   score: 0,
   best: 0,
   spawnTimer: 0,
+  shurikenTimer: 0,
   bombTimer: 0,
   countdownStep: 0,
   countdownTimer: 0,
@@ -248,11 +254,9 @@ let scoreboard = null;
 let banner = null;
 const samurai = [];               // { obj, kind, points, alive, fallen, rising, ... }
 const samuraiByOid = new Map();
-const shurikens = [];             // { obj, live, expire, dir }
+const shurikens = [];             // { obj, state: idle|floating|held|thrown, live, expire, dir, ... }
 const popups = {};                // points -> pooled "+1" / "+3" / "-2" texts
 const bomb = { obj: null, live: false, expire: 0, base: V.zero(), phase: 0 };
-const hands = { left: null, right: null };
-const lastThrow = { left: -10, right: -10 };
 let prevTip = null;
 let tipVel = V.zero();
 
@@ -368,6 +372,7 @@ function checkLoadingStuck() {
 
 function onAllLoaded() {
   game.phase = "ready";
+  setupInputConnect();
   updateStartButton();
   const anyFailed = Object.keys(loadGroups).some((k) => loadGroups[k].failed > 0 || loadGroups[k].backup > 0);
   if (anyFailed) {
@@ -507,26 +512,36 @@ function buildKatana() {
     // Locked (not grabbable) until the controllers are connected, so the trigger
     // can't make Figmin copy it.
     k.interactionState = figmin.InteractionState.LOCKED;
-    figmin.enableInputConnect(
-      "Samurai Dojo",
-      [
-        figmin.InputCode.SELECT_LEFT, figmin.InputCode.SELECT_RIGHT,
-        figmin.InputCode.A, figmin.InputCode.X
-      ],
-      (connected) => {
-        game.inputConnected = connected;
-        katana.interactionState = connected
-          ? figmin.InteractionState.ENABLED : figmin.InteractionState.LOCKED;
-        updateStartButton();
-        if (game.phase === "ready" || game.phase === "over") {
-          setStatus(connected
-            ? "Controllers connected. Grab the katana and press <b>Start Game</b>."
-            : "Controllers disconnected. Tap the <b>connect icon</b> to reconnect.");
-        }
-      },
-      { grabbableObjects: [k] }
-    );
   }, "katana", makeBackup);
+}
+
+/* Called once everything has loaded, so the katana AND the shurikens can be
+   listed as grabbable. Grabbing itself is Figmin's own grip (middle finger) grab.
+   The trigger and A / X are requested only so that Figmin doesn't use them
+   (unconnected, trigger-while-holding makes a copy of the held object). */
+function setupInputConnect() {
+  const grabbable = [katana].concat(shurikens.map((s) => s.obj))
+    .filter((o) => o && o.status.state === figmin.ObjectState.READY);
+  figmin.enableInputConnect(
+    "Samurai Dojo",
+    [
+      figmin.InputCode.SELECT_LEFT, figmin.InputCode.SELECT_RIGHT,
+      figmin.InputCode.A, figmin.InputCode.X
+    ],
+    (connected) => {
+      game.inputConnected = connected;
+      const lock = connected ? figmin.InteractionState.ENABLED : figmin.InteractionState.LOCKED;
+      katana.interactionState = lock;
+      shurikens.forEach((s) => { if (s.state === "floating") s.obj.interactionState = lock; });
+      updateStartButton();
+      if (game.phase === "ready" || game.phase === "over") {
+        setStatus(connected
+          ? "Controllers connected. Grab the katana and press <b>Start Game</b>."
+          : "Controllers disconnected. Tap the <b>connect icon</b> to reconnect.");
+      }
+    },
+    { grabbableObjects: grabbable }
+  );
 }
 
 function buildSamuraiPool() {
@@ -600,13 +615,17 @@ function buildSamurai(k, model, strokes) {
 
 function buildShurikenPool() {
   const base = shurikenStrokes();
+  base.forEach((s) => figmin.sketch.scaleStroke(s, SHURIKEN_SCALE, V.zero()));
   for (let i = 0; i < SHURIKEN_POOL; i++) {
     const obj = figmin.createObject(figmin.ObjectType.SKETCH, {
       position: HIDDEN,
       brushStrokes: base.map((s) => figmin.sketch.cloneStroke(s)),
       colliderType: figmin.ColliderType.SPHERE
     });
-    const rec = { obj: obj, live: false, expire: 0, dir: { x: 0, y: 0, z: 1 } };
+    const rec = {
+      obj: obj, state: "idle", live: false, expire: 0, dir: { x: 0, y: 0, z: 1 },
+      base: V.zero(), phase: 0, spin: 0, samples: [], streak: null
+    };
     shurikens.push(rec);
     trackLoad(obj, (o) => {
       o.interactionState = figmin.InteractionState.LOCKED;
@@ -618,12 +637,13 @@ function buildShurikenPool() {
         maxAngularVelocity: 40,
         kinematic: true
       });
-      // Light streak so you can see where a shuriken flies (and what it hit)
+      // Light streak so you can see where a thrown shuriken flies (and what it hit)
       o.addComponent(figmin.ComponentType.TRAIL);
-      const streak = o.trail.loadTrail("streak", figmin.brushes.Light2);
-      streak.color = "#cfe6ff";
-      streak.size = 0.025;
-      streak.lifetime = 0.3;
+      rec.streak = o.trail.loadTrail("streak", figmin.brushes.Light2);
+      rec.streak.color = "#cfe6ff";
+      rec.streak.size = 0.025;
+      rec.streak.lifetime = 0.3;
+      rec.streak.active = false;
       o.active = false;
       o.collider.onCollisionEnter((hit) => {
         if (!rec.live || !hit.object) return;
@@ -716,12 +736,19 @@ function buildTexts() {
   });
 }
 
+/* Figmin tells each hand when it grabs or lets go of something: that's how we
+   know a shuriken was picked up and when it was thrown. */
 function setupHands() {
   const me = figmin.getLocalPlayer();
-  const L = figmin.getPlayerBodypart(me, figmin.BodypartType.LEFT_HAND);
-  const R = figmin.getPlayerBodypart(me, figmin.BodypartType.RIGHT_HAND);
-  L.onStart((h) => { hands.left = h; });
-  R.onStart((h) => { hands.right = h; });
+  [figmin.BodypartType.LEFT_HAND, figmin.BodypartType.RIGHT_HAND].forEach((type) => {
+    figmin.getPlayerBodypart(me, type).onStart((h) => {
+      h.bodypart.onGrabChanged((hand, isGrab, targetName, targetObj) => {
+        const rec = shurikens.find((s) =>
+          (targetObj && s.obj.oid === targetObj.oid) || s.obj.name === targetName);
+        if (rec) onShurikenGrab(rec, isGrab);
+      });
+    });
+  });
 }
 
 /* =========================================================================
@@ -746,6 +773,7 @@ function startGame() {
   game.elapsed = 0;
   game.timeLeft = GAME_SECONDS;
   game.spawnTimer = 0;
+  game.shurikenTimer = 0;   // first shuriken appears right away
   game.bombTimer = rand(BOMB_EVERY_MIN, BOMB_EVERY_MAX);
   game.lastShownSecond = -1;
   game.lastShownScore = -1;
@@ -763,7 +791,7 @@ function startGame() {
 
 function beginPlaying() {
   game.phase = "playing";
-  setStatus("Topple them! Trigger throws a shuriken.");
+  setStatus("Topple them! Grab floating shurikens with the grip button and throw them.");
   for (let i = 0; i < START_ALIVE; i++) spawnSamurai();
 }
 
@@ -778,6 +806,7 @@ function endGame(reason) {
   }
 
   hideBomb();
+  shurikens.forEach((s) => { if (s.state === "floating") hideShuriken(s); });
   samurai.forEach((rec) => {
     if (rec.alive && !rec.fallen) {
       // Freeze survivors in place for a moment of shame
@@ -1032,49 +1061,96 @@ function checkKatanaVsSamurai(rec) {
 /* =========================================================================
    Shuriken
    ========================================================================= */
-function throwShuriken(side) {
-  const hand = hands[side];
-  if (!hand || !hand.bodypart.tracked) return;
-  if (game.now - lastThrow[side] < THROW_COOLDOWN) return;
-  lastThrow[side] = game.now;
+/* Life of a shuriken: idle (hidden) → floating (bobbing near you, grabbable)
+   → held (Figmin moves it with your hand) → thrown (physics, can hit) → idle. */
 
-  let rec = shurikens.find((s) => !s.live && s.obj.status.state === figmin.ObjectState.READY);
-  if (!rec) {
-    rec = shurikens.filter((s) => s.obj.status.state === figmin.ObjectState.READY)
-                   .sort((a, b) => a.expire - b.expire)[0];
-  }
+function spawnFloatingShuriken() {
+  if (shurikens.filter((s) => s.state === "floating").length >= SHURIKEN_MAX_FLOAT) return;
+  const rec = shurikens.find((s) => s.state === "idle" && s.obj.status.state === figmin.ObjectState.READY);
   if (!rec) return;
 
-  const bp = hand.bodypart;
-  const fwd = bp.rayForward;
-  const up = bp.rayUp;
+  // Within arm's reach, roughly in front of where you're looking, about chest height
+  const cam = camera.transform.position;
+  const yaw = (cameraYaw() + rand(-60, 60)) / DEG;
+  const dist = rand(SHURIKEN_REACH[0], SHURIKEN_REACH[1]);
+  rec.base = {
+    x: cam.x + Math.sin(yaw) * dist,
+    y: clamp(cam.y - rand(0.25, 0.5), 0.8, 1.6),
+    z: cam.z + Math.cos(yaw) * dist
+  };
+  rec.phase = rand(0, Math.PI * 2);
+  rec.spin = rand(0, 360);
+  rec.state = "floating";
+  rec.live = false;
+
   const o = rec.obj;
-
-  o.active = false;           // if recycling a flying one, don't drag it across the room
   o.physics.kinematic = true;
-  o.transform.position = V.add(bp.rayPosition, V.scale(fwd, 0.12));
-  o.transform.rotationq = figmin.lookRotationq(fwd, up);
+  o.transform.position = rec.base;
+  o.interactionState = game.inputConnected
+    ? figmin.InteractionState.ENABLED : figmin.InteractionState.LOCKED;
   o.active = true;
-  o.physics.kinematic = false;
-  o.physics.velocity = V.scale(fwd, SHURIKEN_SPEED);
-  o.physics.angularVelocity = V.scale(up, 30);
+}
 
-  rec.live = true;
-  rec.dir = fwd;
+function onShurikenGrab(rec, isGrab) {
+  if (isGrab) {
+    if (rec.state !== "floating") return;
+    rec.state = "held";
+    rec.samples = [];
+    rec.obj.physics.kinematic = true;
+    return;
+  }
+  if (rec.state !== "held") return;
+  throwHeldShuriken(rec);
+}
+
+/* Throw speed = how fast the shuriken moved in your hand just before you let go */
+function throwHeldShuriken(rec) {
+  const o = rec.obj;
+  const now = { t: game.now, p: o.transform.position };
+  const old = rec.samples.find((s) => now.t - s.t <= 0.1) || rec.samples[0];
+  let vel = V.zero();
+  if (old && now.t - old.t > 0.005) vel = V.scale(V.sub(now.p, old.p), THROW_BOOST / (now.t - old.t));
+  const speed = V.len(vel);
+  if (speed > THROW_MAX_SPEED) vel = V.scale(vel, THROW_MAX_SPEED / speed);
+
+  rec.state = "thrown";
+  rec.live = speed >= THROW_MIN_SPEED;   // a gentle drop doesn't count as a throw
+  rec.dir = rec.live ? V.norm(vel) : { x: 0, y: -1, z: 0 };
   rec.expire = game.now + SHURIKEN_LIFETIME;
+  o.interactionState = figmin.InteractionState.LOCKED;
+  o.physics.kinematic = false;
+  o.physics.sleeping = false;
+  o.physics.velocity = vel;
+  o.physics.angularVelocity = V.scale(o.transform.up, 25);   // spin flat like a real one
+  if (rec.streak) rec.streak.active = true;
 }
 
 function hideShuriken(rec) {
   if (rec.obj.status.state !== figmin.ObjectState.READY) return;
+  rec.state = "idle";
   rec.live = false;
+  if (rec.streak) rec.streak.active = false;
   rec.obj.physics.kinematic = true;
+  rec.obj.interactionState = figmin.InteractionState.LOCKED;
   rec.obj.active = false;
   rec.obj.transform.position = HIDDEN;
 }
 
-function updateShurikens() {
+function updateShurikens(dt) {
   for (const s of shurikens) {
-    if (s.live && game.now >= s.expire) hideShuriken(s);
+    if (s.state === "floating") {
+      // Gentle bob and spin so it catches the eye
+      s.phase += dt * 2.2;
+      s.spin = (s.spin + 120 * dt) % 360;
+      s.obj.transform.position = { x: s.base.x, y: s.base.y + Math.sin(s.phase) * 0.03, z: s.base.z };
+      s.obj.transform.rotation = { x: 70, y: s.spin, z: 0 };
+    } else if (s.state === "held") {
+      // Remember the last few positions to work out the throw speed on release
+      s.samples.push({ t: game.now, p: s.obj.transform.position });
+      if (s.samples.length > 12) s.samples.shift();
+    } else if (s.state === "thrown" && game.now >= s.expire) {
+      hideShuriken(s);
+    }
   }
 }
 
@@ -1219,16 +1295,7 @@ function tick(dt) {
   }
 
   updateKatanaMotion(dt);
-
-  // Throwing works any time (practice before the round too)
-  if (figmin.getInputDown(figmin.InputCode.SELECT_RIGHT) || figmin.getInputDown(figmin.InputCode.A)) {
-    throwShuriken("right");
-  }
-  if (figmin.getInputDown(figmin.InputCode.SELECT_LEFT) || figmin.getInputDown(figmin.InputCode.X)) {
-    throwShuriken("left");
-  }
-
-  updateShurikens();
+  updateShurikens(dt);
   updateSamurai(dt);
   updatePopups(dt);
 
@@ -1259,6 +1326,12 @@ function tick(dt) {
     if (game.spawnTimer <= 0 && aliveCount() < cap) {
       spawnSamurai();
       game.spawnTimer = SPAWN_INTERVAL;
+    }
+
+    game.shurikenTimer -= dt;
+    if (game.shurikenTimer <= 0) {
+      spawnFloatingShuriken();
+      game.shurikenTimer = SHURIKEN_EVERY;
     }
 
     updateBomb(dt);

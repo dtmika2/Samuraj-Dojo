@@ -8,7 +8,7 @@ This file hands the project over from a claude.ai chat to Claude Code. Read it f
 
 Gameplay:
 - The player grabs a **katana** (floats next to the app window) and swings it.
-- Trigger (or A / X) throws a **shuriken** from that hand.
+- Every 5 s a **shuriken** appears floating within arm's reach; the player grabs it with Figmin's grip (middle-finger) grab and throws it with a real arm swing. (The old trigger-throw was removed on user request, 2026-10-21: "shurikens still act weird".)
 - **Cardboard figures** (3D models) pop up out of the floor in an arc in front of the player. Toppling one scores points: samurai = 1, colourful armoured "shogun" (axe warrior / spear samurai) = 3, innocent monk / geisha = −2 (score may go negative). Only falls the player caused count (see "hit credit" below).
 - A round lasts **60 seconds** (3-2-1-"HAJIME!" countdown first).
 - A **black bomb** appears now and then; hitting it (sword or shuriken) ends the game early ("BOOM!"). Can be disabled with a checkbox.
@@ -52,18 +52,20 @@ Sections, in order:
 - `init()` on `FigminReady`: spatial-app + master checks, load best score, build everything, set update loop.
 - `trackLoad(obj, onReady, label, makeBackup?)`: counts objects to READY; per-group report; tolerant of setup errors (try/catch) and load errors; after 15 s of loading the status box lists which group is stuck. If a MODEL3D fails (`onError`) and `makeBackup` is given, it creates the sketch version instead and the report says "using backup shape". `onReady` must use the object it receives (it may be the backup).
 - Geometry builders (procedural sketch strokes): `katanaStrokes`, `samuraiStrokes(isShogun)` — only used as backups for failed models — plus `shurikenStrokes`, `bombStrokes` (always used).
-- Object pools created once at startup (hidden at y = -20, `active = false`): katana (1, MODEL3D), samurai records (6 normal + 2 shogun + 2 innocent, MODEL3D, BOX collider; `rec.kind` / `rec.points`), shurikens (8, with a Light2 trail so throws are visible), bomb (1), scoreboard text, banner text, "+1"/"+3"/"-2" popup texts (4 + 2 + 2). Total 30 objects.
+- Object pools created once at startup (hidden at y = -20, `active = false`): katana (1, MODEL3D), samurai records (6 normal + 2 shogun + 2 innocent, MODEL3D, BOX collider; `rec.kind` / `rec.points`), shurikens (8, scaled ×`SHURIKEN_SCALE`, Light2 trail only while thrown), bomb (1), scoreboard text, banner text, "+1"/"+3"/"-2" popup texts (4 + 2 + 2). Total 30 objects.
 - Samurai records carry `halfH` / `footR` read from `transform.size` after load (models are centered on their bounding box). Spawn spacing uses `footR` so wide colliders (axe, spear) don't overlap.
 - Spawning is two-step: `spawnSamurai` picks a spot (`rec.pending`), `checkSpawnSpot` fires two `raycastSphere` probes on `Layers.SURFACE` (player→spot at waist height for walls/furniture; down onto the spot for the real floor height, |y| > 0.2 = table/bed = blocked); results arrive next frame, then `placeSamurai` rises it out of the floor (kinematic, from `riseDepth(rec)` below the real floor) and turns physics on (`rec.physicsAt`).
 - **Hit credit** (`rec.hitAt`): set by `knock()` (shuriken / katana), by the katana geometric check even at low speed, and by a samurai being bumped by another samurai hit within `HIT_CREDIT_SECONDS` (chain reaction; samurai collision callback requests `object`). Falls without credit score nothing (console warn). A samurai faster than `EJECT_SPEED` within 0.6 s of physics turning on, without credit, was pushed out by room geometry → hidden, console warn.
 - Fallen when `transform.up.y < FALL_UP_Y` or dropped low → score (if credited) + popup → hidden after 1.6 s.
+- Shuriken lifecycle `rec.state`: idle → floating (`spawnFloatingShuriken`, bob + spin, kinematic, ENABLED if connected, max `SHURIKEN_MAX_FLOAT`) → held (`bodypart.onGrabChanged` on both hands → `onShurikenGrab`; positions sampled each frame) → thrown (`throwHeldShuriken`: velocity = displacement over the last ~0.1 s × `THROW_BOOST`, clamped; below `THROW_MIN_SPEED` it's a drop and `live` stays false so it can't score) → idle after `SHURIKEN_LIFETIME`. Nothing here is verified on device: if `onGrabChanged` doesn't fire for these objects, or Figmin applies its own release velocity, revisit.
+- `enableInputConnect` is called from `onAllLoaded` (`setupInputConnect`) so `grabbableObjects` can list the katana and all shurikens. Trigger/A/X are still requested only so Figmin doesn't act on them.
 - Controller connection gates the game: katana is `LOCKED` until `enableInputConnect` reports connected (then `ENABLED`), Start button disabled until connected (`updateStartButton`). Reason: unconnected, Figmin owns the trigger, and trigger-while-holding duplicates the object (Tilt Brush heritage) — the user saw the katana "clone itself and stay in place". Grip inputs are not requested.
 - Katana model is pre-straightened: blade along local +Y, tip up, centered; `katanaSegment()` uses `BLADE_*_FRAC × transform.size.y`.
 - Hits: `knock(rec, dir, strength)` sets velocity + angular velocity to tip the samurai in the push direction.
   - Shuriken → `collider.onCollisionEnter` on each shuriken, looked up via `samuraiByOid`.
   - Katana → both a collision callback on samurai (by object name `DojoKatana`) **and** a geometric check every frame (blade segment vs samurai axis, only when blade-tip speed > `KATANA_MIN_SPEED`). The geometric check exists because a grabbed non-physics object may not generate collisions.
 - Bomb: static, bobbing, fuse trail (Embers) + pulsing light. Shuriken collision or katana geometric check → `endGame("bomb")`.
-- `tick(dt)`: input → shurikens → samurai → popups → countdown → playing (timer, spawn ramp, bomb, HUD, end on timer).
+- `tick(dt)`: katana motion → shurikens → samurai → popups → countdown → playing (timer, spawn ramp, floating-shuriken timer, bomb, HUD, end on timer).
 
 ## Current status (as of 2026-10-21)
 

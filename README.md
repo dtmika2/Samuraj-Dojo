@@ -15,7 +15,7 @@ A 60-second mixed-reality physics game for **Figmin XR**. Grab a katana, throw s
 | Action | Input |
 |---|---|
 | Swing sword | Grab the katana and swing it |
-| Throw shuriken | Trigger (or A / X) on that hand |
+| Throw shuriken | A shuriken floats up near you every 5 seconds: grab it with the **grip button** (middle finger), swing your arm and let go |
 
 ## Scoring
 
