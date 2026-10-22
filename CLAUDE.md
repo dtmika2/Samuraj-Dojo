@@ -86,6 +86,8 @@ Sections, in order:
 - The script was smoke-tested in Node against a fake `figmin` mock (load, backup path, round, hits, bomb, not-connected, blocked spawn spot, ejection, self-fall) — this catches JS/logic errors only, not engine behaviour.
 - User report on v2 (before these fixes): "some samurais were flying out on their own" and the katana "cloned itself and stayed in place" when grabbed. Clone = Figmin trigger-duplicate while not connected (fixed by locking). Flying: root cause not confirmed; most likely spawning inside room geometry (furniture/walls/floor above y=0) → physics depenetration. v3 adds room probes, ejection removal, and hit credit. If it still happens, ask for Console lines containing "pushed out" / "fell over without being hit" / "Spawn spot blocked".
 
+- 2026-10-22 lag fix (convex katana collider, fewer collision callbacks) confirmed on the Quest 3: "better now… still a bit of lags, but acceptable". If it needs more work: lower-poly samurai models (simpler convex colliders, ~30k tris each to render), fewer per-frame transform writes, smaller pools on level 3.
+
 ## Next tasks
 
 1. ~~Host on GitHub Pages~~ — done 2026-10-21: Pages serves `main` / root at **https://dtmika2.github.io/Samuraj-Dojo/** (models at `.../models/game/`). Every push to `main` redeploys in ~1 min. The user opens that URL in Figmin's browser and accepts the spatial-app prompt. The full-detail Meshy originals are git-ignored (local only; a local branch `backup/start-of-project-with-originals` still holds the first commit that contained them — never push it).
