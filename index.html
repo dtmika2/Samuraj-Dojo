@@ -167,8 +167,9 @@ const INNOCENT_POINTS    = -2;    // toppling a monk or geisha costs points
 const SPAWN_MIN_DIST     = 1.6;   // meters from player
 const SPAWN_MAX_DIST     = 3.0;
 const SPAWN_RETRY        = 0.25;  // seconds before trying again when the room blocked a spot
-const FALL_BUMPS         = 2;     // after a hit: bumps into walls / furniture before it stops reacting (freezes)
-const FALL_PHYSICS_TIME  = 1.5;   // seconds of real physics after a hit; then it freezes anyway
+const FALL_BUMPS         = 2;     // after a hit: bumps into walls / furniture before they stop mattering
+const FALL_PHYSICS_TIME  = 1.5;   // seconds of real physics after a hit at most
+const SETTLE_TIME        = 0.45;  // after that: seconds to tip the rest of the way down (from upright) through furniture
 const FALL_MAX_SPEED     = 4;     // m/s; a falling samurai is never faster (no flying off out of a wall)
 const FALL_REMOVE_TIME   = 2.2;   // seconds after the hit before it disappears
 const SHURIKEN_POOL      = 8;
@@ -252,6 +253,7 @@ const V = {
   sub:  (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }),
   scale:(a, s) => ({ x: a.x * s, y: a.y * s, z: a.z * s }),
   dot:  (a, b) => a.x * b.x + a.y * b.y + a.z * b.z,
+  cross:(a, b) => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }),
   len:  (a) => Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z),
   flat: (a) => ({ x: a.x, y: 0, z: a.z }),
   norm: (a) => { const l = V.len(a); return l > 1e-6 ? V.scale(a, 1 / l) : { x: 0, y: 0, z: 0 }; },
@@ -681,10 +683,10 @@ function buildSamurai(k, model, strokes) {
     obj: obj, model: model, kind: k.kind, points: k.points,
     alive: false, pending: false, fallen: false,
     rising: false, riseT: 0, target: V.zero(), yaw: 0,
-    frozen: false, bumps: 0, freezeAt: 0, removeAt: 0,
+    settle: null, bumps: 0, fallDir: V.zero(), settleAt: 0, removeAt: 0,
     onHit: null, hitFields: ["objectName", "normal"], listening: false,
     // replaced with the real size once loaded
-    halfH: SAMURAI_HEIGHT / 2, footR: 0.4, hitR: 0.15
+    halfH: SAMURAI_HEIGHT / 2, halfT: 0.15, footR: 0.4, hitR: 0.15
   };
   samurai.push(rec);
   const makeBackup = () => (rec.obj = figmin.createObject(figmin.ObjectType.SKETCH, {
@@ -698,6 +700,7 @@ function buildSamurai(k, model, strokes) {
     const size = o.transform.size;
     if (size && size.y > 0.1) {
       rec.halfH = size.y / 2;
+      rec.halfT = Math.min(size.x, size.z) / 2;
       rec.footR = Math.max(size.x, size.z) / 2;
       rec.hitR = clamp(Math.min(size.x, size.z) / 2 * SAMURAI_HIT_FRAC, SAMURAI_HIT_MIN, SAMURAI_HIT_MAX);
     }
@@ -1273,9 +1276,11 @@ function updateSamurai(dt) {
     if (rec.fallen) {
       if (game.now >= rec.removeAt || o.transform.position.y < game.floorY - 1) {
         hideSamurai(rec);
-      } else if (!rec.frozen) {
-        if (game.now >= rec.freezeAt) {
-          freezeFallen(rec);
+      } else if (rec.settle) {
+        updateSettle(rec, dt);
+      } else {
+        if (game.now >= rec.settleAt) {
+          startSettle(rec);
         } else {
           // Never let it fly off (e.g. hit while standing inside a wall)
           const v = o.physics.velocity;
@@ -1303,9 +1308,10 @@ function knock(rec, dir, strength) {
   if (V.len(d) < 0.5) d = { x: -Math.sin(rec.yaw / DEG), y: 0, z: -Math.cos(rec.yaw / DEG) };   // backwards
 
   rec.fallen = true;
-  rec.frozen = false;
+  rec.settle = null;
   rec.bumps = 0;
-  rec.freezeAt = game.now + FALL_PHYSICS_TIME;
+  rec.fallDir = d;
+  rec.settleAt = game.now + FALL_PHYSICS_TIME;
   rec.removeAt = game.now + FALL_REMOVE_TIME;
 
   const s = strength;
@@ -1324,19 +1330,67 @@ function knock(rec, dir, strength) {
 }
 
 /* Falling samurai react to walls and furniture only briefly: after FALL_BUMPS
-   bumps (the floor doesn't count) it stops where it is and ignores everything. */
+   bumps (the floor doesn't count) the rest of the fall is animated, straight
+   through furniture, until it lies on the floor. */
 function onFallenBump(rec, hit) {
-  if (rec.frozen) return;
+  if (rec.settle) return;
   if (hit.objectName && (hit.objectName === katanaName || shurikenByName.has(hit.objectName))) return;
   if (hit.normal && Math.abs(hit.normal.y) > 0.7) return;   // floor or a table top
   rec.bumps++;
-  if (rec.bumps >= FALL_BUMPS) freezeFallen(rec);
+  if (rec.bumps >= FALL_BUMPS) startSettle(rec);
 }
 
-function freezeFallen(rec) {
-  rec.frozen = true;
+/* Physics off (Figmin can't ignore just the furniture), then tip from the
+   current pose to lying flat, the foot sliding down to the floor. */
+function startSettle(rec) {
   listenForHits(rec, false);
-  rec.obj.physics.kinematic = true;
+  const o = rec.obj;
+  o.physics.kinematic = true;
+  const t = o.transform;
+  const up = t.up;
+  let d = V.norm(V.flat(up));   // keep falling the way it already leans
+  if (V.len(d) < 0.5) d = rec.fallDir;
+  let axis = V.norm(V.cross(up, d));
+  if (V.len(axis) < 0.5) axis = { x: d.z, y: 0, z: -d.x };
+  const angle = Math.acos(clamp(V.dot(up, d), -1, 1));
+  const foot = V.sub(t.position, V.scale(up, rec.halfH));
+  const drop = Math.max(0, foot.y - game.floorY);
+  const dur = Math.max(0.15, SETTLE_TIME * angle / (Math.PI / 2), Math.sqrt(2 * drop / 9.81));
+  rec.settle = { t: 0, dur: dur, q0: t.rotationq, up0: up, axis: axis, angle: angle, foot: foot };
+  rec.removeAt = Math.max(rec.removeAt, game.now + dur + 0.6);
+}
+
+function updateSettle(rec, dt) {
+  const s = rec.settle;
+  if (s.t >= s.dur) return;
+  s.t = Math.min(s.dur, s.t + dt);
+  const e = (s.t / s.dur) * (s.t / s.dur);   // speeds up like a real fall
+  const a = s.angle * e;
+  const up = rotateAround(s.up0, s.axis, a);
+  const footY = s.foot.y + (game.floorY - s.foot.y) * e;
+  const lift = rec.halfT * Math.sqrt(Math.max(0, 1 - up.y * up.y));   // rests on its side, not half in the floor
+  rec.obj.transform.position = {
+    x: s.foot.x + up.x * rec.halfH,
+    y: footY + up.y * rec.halfH + lift,
+    z: s.foot.z + up.z * rec.halfH
+  };
+  const h = Math.sin(a / 2);
+  rec.obj.transform.rotationq = quatMul({ x: s.axis.x * h, y: s.axis.y * h, z: s.axis.z * h, w: Math.cos(a / 2) }, s.q0);
+}
+
+/* Rodrigues: v turned by angle a around the unit axis k */
+function rotateAround(v, k, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return V.add(V.add(V.scale(v, c), V.scale(V.cross(k, v), s)), V.scale(k, V.dot(k, v) * (1 - c)));
+}
+
+function quatMul(a, b) {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+  };
 }
 
 /* =========================================================================
