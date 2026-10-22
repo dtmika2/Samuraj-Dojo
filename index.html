@@ -164,6 +164,7 @@ const INNOCENT_CHANCE    = 0.2;   // chance a spawn is an innocent
 const NORMAL_POINTS      = 1;
 const SHOGUN_POINTS      = 3;
 const INNOCENT_POINTS    = -2;    // toppling a monk or geisha costs points
+const INNOCENT_STAY      = 6;     // seconds a monk / geisha stands before sinking back into the floor
 const SPAWN_MIN_DIST     = 1.6;   // meters from player
 const SPAWN_MAX_DIST     = 3.0;
 const SPAWN_RETRY        = 0.25;  // seconds before trying again when the room blocked a spot
@@ -682,7 +683,7 @@ function buildSamurai(k, model, strokes) {
   const rec = {
     obj: obj, model: model, kind: k.kind, points: k.points,
     alive: false, pending: false, fallen: false,
-    rising: false, riseT: 0, target: V.zero(), yaw: 0,
+    rising: false, sinking: false, riseT: 0, leaveAt: Infinity, target: V.zero(), yaw: 0,
     settle: null, bumps: 0, fallDir: V.zero(), settleAt: 0, removeAt: 0,
     onHit: null, hitFields: ["objectName", "normal"], listening: false,
     // replaced with the real size once loaded
@@ -1233,7 +1234,9 @@ function placeSamurai(rec, pos) {
   rec.alive = true;
   rec.fallen = false;
   rec.rising = true;
+  rec.sinking = false;
   rec.riseT = 0;
+  rec.leaveAt = Infinity;
 
   const o = rec.obj;
   o.transform.rotation = { x: 0, y: rec.yaw, z: 0 };   // model front (+Z) faces the player
@@ -1251,6 +1254,7 @@ function hideSamurai(rec) {
   rec.pending = false;
   rec.fallen = false;
   rec.rising = false;
+  rec.sinking = false;
   rec.obj.physics.kinematic = true;
   rec.obj.active = false;
   rec.obj.transform.position = HIDDEN;
@@ -1268,8 +1272,23 @@ function updateSamurai(dt) {
       o.transform.position = { x: rec.target.x, y: rec.target.y - riseDepth(rec) * (1 - e), z: rec.target.z };
       if (rec.riseT >= 1) {
         rec.rising = false;
+        rec.leaveAt = rec.kind === "innocent" ? game.now + INNOCENT_STAY : Infinity;
         listenForHits(rec, true);
       }
+      continue;
+    }
+
+    // Innocents left alone go back down into the floor
+    if (rec.sinking) {
+      rec.riseT = Math.max(0, rec.riseT - dt / 0.35);
+      const e = 1 - Math.pow(1 - rec.riseT, 3);
+      o.transform.position = { x: rec.target.x, y: rec.target.y - riseDepth(rec) * (1 - e), z: rec.target.z };
+      if (rec.riseT <= 0) hideSamurai(rec);
+      continue;
+    }
+    if (!rec.fallen && game.now >= rec.leaveAt) {
+      rec.sinking = true;
+      listenForHits(rec, false);
       continue;
     }
 
@@ -1300,7 +1319,7 @@ function updateSamurai(dt) {
    turns on and it topples in the push direction. While standing it is
    kinematic, so walls, furniture and hands can't push it around. */
 function knock(rec, dir, strength) {
-  if (!rec.alive || rec.fallen || rec.rising) return;
+  if (!rec.alive || rec.fallen || rec.rising || rec.sinking) return;
   let d = V.norm(V.flat(dir));
   if (V.len(d) < 0.5) {
     d = V.norm(V.flat(V.sub(rec.obj.transform.position, camera.transform.position)));
@@ -1507,7 +1526,7 @@ function checkShurikenVsSamurai(s) {
   const from = s.prevPos || p;
   s.prevPos = p;
   for (const rec of samurai) {
-    if (!rec.alive || rec.fallen || rec.rising) continue;
+    if (!rec.alive || rec.fallen || rec.rising || rec.sinking) continue;
     const t = rec.obj.transform;
     const axis = rec.halfH * SAMURAI_AXIS_FRAC;
     const a = V.add(t.position, V.scale(t.up, -axis));
