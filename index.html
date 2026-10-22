@@ -345,7 +345,8 @@ let scoreboard = null;
 let banner = null;
 let music = null;                 // audio clip on the scoreboard object
 const samurai = [];               // { obj, kind, points, alive, fallen, rising, ... }
-const samuraiByOid = new Map();
+const samuraiByName = new Map();  // collision events report the other object's name
+let bombName = "";
 const shurikens = [];             // { obj, state: idle|floating|held|thrown, live, expire, dir, ... }
 const popups = {};                // points -> pooled "+1" / "+3" / "-2" texts
 const bomb = { obj: null, live: false, expire: 0, base: V.zero(), phase: 0 };
@@ -597,9 +598,11 @@ function buildKatana() {
   const spawn = {
     position: figmin.getWindowSpawnPosition(0.25, "right"),
     rotation: figmin.getWindow().transform.rotation,
-    // EXACT = follows the real blade shape (a box around a curved katana is ~10 cm
-    // thick everywhere). Allowed because the katana has no physics component.
-    colliderType: figmin.ColliderType.EXACT,
+    // APPROXIMATE = convex shape around the (straight) katana: a few cm thick at the
+    // guard, thin toward the tip. EXACT used all ~10.7k triangles of the model and
+    // made the game lag whenever the blade was inside a samurai (repeated hits).
+    // Who gets knocked is decided by the blade-line check, not by this shape.
+    colliderType: figmin.ColliderType.APPROXIMATE,
     name: "DojoKatana"
   };
   katana = figmin.createObject(figmin.ObjectType.MODEL3D, Object.assign({
@@ -660,8 +663,10 @@ function buildSamuraiPool() {
 }
 
 function buildSamurai(k, model, strokes) {
+  const name = "DojoSamurai" + samurai.length;
   const obj = figmin.createObject(figmin.ObjectType.MODEL3D, {
     position: HIDDEN,
+    name: name,
     url: MODEL_BASE + model + ".glb",
     targetSize: SAMURAI_HEIGHT * (MODEL_WIDTH_FIX[model] || 1),
     // Convex shape around the figure: much tighter than a box around
@@ -673,12 +678,14 @@ function buildSamurai(k, model, strokes) {
     alive: false, pending: false, fallen: false,
     rising: false, riseT: 0, target: V.zero(), yaw: 0, physicsAt: 0,
     removeAt: 0, lastKnock: -10, hitAt: -10,
+    onHit: null, listening: false,
     // replaced with the real size once loaded
     halfH: SAMURAI_HEIGHT / 2, footR: 0.4, hitR: 0.15
   };
   samurai.push(rec);
   const makeBackup = () => (rec.obj = figmin.createObject(figmin.ObjectType.SKETCH, {
     position: HIDDEN,
+    name: name,
     brushStrokes: strokes.map((s) => figmin.sketch.cloneStroke(s)),
     colliderType: figmin.ColliderType.BOX
   }));
@@ -705,18 +712,20 @@ function buildSamurai(k, model, strokes) {
       kinematic: true
     });
     o.active = false;
-    samuraiByOid.set(o.oid, rec);
+    samuraiByName.set(o.name, rec);
 
-    o.collider.onCollisionEnter((hit) => {
+    // Registered only while it stands (see listenForHits)
+    rec.onHit = (hit) => {
+      if (!hit.objectName) return;
       // Katana collision (physics contact)
-      if (hit.objectName && hit.objectName === katanaName) {
+      if (hit.objectName === katanaName) {
         knock(rec, katanaKnockDir(rec), katanaStrength());
         return;
       }
       // Bumped by a samurai you hit → this fall counts too (chain reaction)
-      const other = hit.object && samuraiByOid.get(hit.object.oid);
+      const other = samuraiByName.get(hit.objectName);
       if (other && game.now - other.hitAt < HIT_CREDIT_SECONDS) rec.hitAt = game.now;
-    }, ["objectName", "object"]);
+    };
   }, k.kind === "innocent" ? "innocent" : "samurai", makeBackup);
 }
 
@@ -731,7 +740,8 @@ function buildShurikenPool() {
     });
     const rec = {
       obj: obj, state: "idle", live: false, expire: 0, dir: { x: 0, y: 0, z: 1 },
-      base: V.zero(), phase: 0, spin: 0, samples: [], streak: null
+      base: V.zero(), phase: 0, spin: 0, samples: [], streak: null,
+      onHit: null, listening: false
     };
     shurikens.push(rec);
     trackLoad(obj, (o) => {
@@ -752,12 +762,13 @@ function buildShurikenPool() {
       rec.streak.lifetime = 0.3;
       rec.streak.active = false;
       o.active = false;
-      o.collider.onCollisionEnter((hit) => {
-        if (!rec.live || !hit.object) return;
-        const target = samuraiByOid.get(hit.object.oid);
+      // Registered only while it flies (see listenForHits)
+      rec.onHit = (hit) => {
+        if (!rec.live || !hit.objectName) return;
+        const target = samuraiByName.get(hit.objectName);
         if (target) knock(target, rec.dir, 1.0);
-        else if (bomb.obj && hit.object.oid === bomb.obj.oid) bombHit();
-      }, ["object"]);
+        else if (hit.objectName === bombName) bombHit();
+      };
     }, "shuriken");
   }
 }
@@ -766,9 +777,11 @@ function buildBomb() {
   bomb.obj = figmin.createObject(figmin.ObjectType.SKETCH, {
     position: HIDDEN,
     brushStrokes: bombStrokes(),
-    colliderType: figmin.ColliderType.SPHERE
+    colliderType: figmin.ColliderType.SPHERE,
+    name: "DojoBomb"
   });
   trackLoad(bomb.obj, (o) => {
+    bombName = o.name;
     o.interactionState = figmin.InteractionState.LOCKED;
     o.addComponent(figmin.ComponentType.TRAIL);
     const spark = o.trail.loadTrail("spark", figmin.brushes.Embers);
@@ -939,6 +952,16 @@ function startMusic() {
 
 function stopMusic() {
   if (music) music.stop();
+}
+
+/* Every collision event is a message from Figmin to this page, and Figmin only
+   works them out while a callback is registered. So samurai listen only while
+   standing and shurikens only while flying, and they ask just for the name. */
+function listenForHits(rec, on) {
+  if (rec.listening === on || !rec.onHit) return;
+  rec.listening = on;
+  if (on) rec.obj.collider.onCollisionEnter(rec.onHit, ["objectName"]);
+  else rec.obj.collider.onCollisionEnter(null);
 }
 
 /* Figmin tells each hand when it grabs or lets go of something: that's how we
@@ -1196,6 +1219,7 @@ function riseDepth(rec) { return rec.halfH * 2 + 0.1; }
 
 function hideSamurai(rec) {
   if (rec.obj.status.state !== figmin.ObjectState.READY) return;
+  listenForHits(rec, false);
   rec.alive = false;
   rec.pending = false;
   rec.fallen = false;
@@ -1220,6 +1244,7 @@ function updateSamurai(dt) {
         rec.physicsAt = game.now;
         o.physics.kinematic = false;
         o.physics.sleeping = false;
+        listenForHits(rec, true);
       }
       continue;
     }
@@ -1246,6 +1271,7 @@ function updateSamurai(dt) {
 
     if (tipped || lost) {
       rec.fallen = true;
+      listenForHits(rec, false);
       rec.removeAt = game.now + 1.6;
       if (game.phase === "playing" && wasHit) {
         game.score += rec.points;
@@ -1383,10 +1409,12 @@ function throwHeldShuriken(rec) {
   o.physics.velocity = vel;
   o.physics.angularVelocity = V.scale(o.transform.up, 25);   // spin flat like a real one
   if (rec.streak) rec.streak.active = true;
+  if (rec.live) listenForHits(rec, true);
 }
 
 function hideShuriken(rec) {
   if (rec.obj.status.state !== figmin.ObjectState.READY) return;
+  listenForHits(rec, false);
   rec.state = "idle";
   rec.live = false;
   if (rec.streak) rec.streak.active = false;
