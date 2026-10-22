@@ -164,12 +164,12 @@ const INNOCENT_CHANCE    = 0.2;   // chance a spawn is an innocent
 const NORMAL_POINTS      = 1;
 const SHOGUN_POINTS      = 3;
 const INNOCENT_POINTS    = -2;    // toppling a monk or geisha costs points
-const HIT_CREDIT_SECONDS = 4;     // a fall only counts if you hit it (or it was hit by a falling one) this recently
-const EJECT_SPEED        = 3;     // m/s; faster than this right after rising, without a hit = pushed out by the room → removed
 const SPAWN_MIN_DIST     = 1.6;   // meters from player
 const SPAWN_MAX_DIST     = 3.0;
 const SPAWN_RETRY        = 0.25;  // seconds before trying again when the room blocked a spot
-const FALL_UP_Y          = 0.45;  // tipped when up-vector y drops below this
+const FALL_TIME          = 0.55;  // seconds a hit samurai takes to topple flat (scripted, not physics)
+const FALL_SLIDE         = 0.25;  // meters a hit samurai slides back while toppling (× hit strength)
+const LIE_TIME           = 1.1;   // seconds it lies on the floor before disappearing
 const SHURIKEN_POOL      = 8;
 const SHURIKEN_EVERY     = 5;     // seconds between new floating shurikens
 const SHURIKEN_MAX_FLOAT = 3;     // max shurikens floating and waiting to be grabbed
@@ -234,6 +234,7 @@ const SAMURAI_AXIS_FRAC = 0.75;  // hit axis half-length, as a fraction of half 
 const SAMURAI_HIT_FRAC  = 0.6;   // hit radius around that axis, as a fraction of half the body's slimmer side
 const SAMURAI_HIT_MIN   = 0.10;  // hit radius limits (m)
 const SAMURAI_HIT_MAX   = 0.22;
+const SHURIKEN_HIT_PAD  = 0.08;  // added to the hit radius for a shuriken (its own size)
 
 /* Katana blade, as fractions of the katana's length from its center (blade points along +Y) */
 const BLADE_BASE_FRAC = -0.21;   // guard
@@ -344,6 +345,7 @@ let banner = null;
 let music = null;                 // audio clip on the scoreboard object
 const samurai = [];               // { obj, kind, points, alive, fallen, rising, ... }
 const samuraiByName = new Map();  // collision events report the other object's name
+const shurikenByName = new Map();
 let bombName = "";
 const shurikens = [];             // { obj, state: idle|floating|held|thrown, live, expire, dir, ... }
 const popups = {};                // points -> pooled "+1" / "+3" / "-2" texts
@@ -674,11 +676,11 @@ function buildSamurai(k, model, strokes) {
   const rec = {
     obj: obj, model: model, kind: k.kind, points: k.points,
     alive: false, pending: false, fallen: false,
-    rising: false, riseT: 0, target: V.zero(), yaw: 0, physicsAt: 0,
-    removeAt: 0, lastKnock: -10, hitAt: -10,
+    rising: false, riseT: 0, target: V.zero(), yaw: 0,
+    fallT: 0, fallDir: V.zero(), fallSlide: 0, removeAt: 0,
     onHit: null, listening: false,
     // replaced with the real size once loaded
-    halfH: SAMURAI_HEIGHT / 2, footR: 0.4, hitR: 0.15
+    halfH: SAMURAI_HEIGHT / 2, halfT: 0.15, footR: 0.4, hitR: 0.15
   };
   samurai.push(rec);
   const makeBackup = () => (rec.obj = figmin.createObject(figmin.ObjectType.SKETCH, {
@@ -692,6 +694,7 @@ function buildSamurai(k, model, strokes) {
     const size = o.transform.size;
     if (size && size.y > 0.1) {
       rec.halfH = size.y / 2;
+      rec.halfT = Math.min(size.x, size.z) / 2;
       rec.footR = Math.max(size.x, size.z) / 2;
       rec.hitR = clamp(Math.min(size.x, size.z) / 2 * SAMURAI_HIT_FRAC, SAMURAI_HIT_MIN, SAMURAI_HIT_MAX);
     }
@@ -703,6 +706,8 @@ function buildSamurai(k, model, strokes) {
       staticFriction: 0.8,
       dynamicFriction: 0.7
     });
+    // Always kinematic: walls, furniture, hands and other samurai can't push it.
+    // Only shurikens and the katana knock it over (knock() plays a scripted fall).
     o.addComponent(figmin.ComponentType.PHYSICS, {
       mass: k.mass,
       drag: 0.1,
@@ -712,17 +717,16 @@ function buildSamurai(k, model, strokes) {
     o.active = false;
     samuraiByName.set(o.name, rec);
 
-    // Registered only while it stands (see listenForHits)
+    // Registered only while it stands (see listenForHits). Anything that isn't
+    // the katana or a thrown shuriken is ignored.
     rec.onHit = (hit) => {
       if (!hit.objectName) return;
-      // Katana collision (physics contact)
       if (hit.objectName === katanaName) {
         knock(rec, katanaKnockDir(rec), katanaStrength());
         return;
       }
-      // Bumped by a samurai you hit → this fall counts too (chain reaction)
-      const other = samuraiByName.get(hit.objectName);
-      if (other && game.now - other.hitAt < HIT_CREDIT_SECONDS) rec.hitAt = game.now;
+      const s = shurikenByName.get(hit.objectName);
+      if (s && s.live) knock(rec, s.dir, 1.0);
     };
   }, k.kind === "innocent" ? "innocent" : "samurai", makeBackup);
 }
@@ -733,16 +737,18 @@ function buildShurikenPool() {
   for (let i = 0; i < SHURIKEN_POOL; i++) {
     const obj = figmin.createObject(figmin.ObjectType.SKETCH, {
       position: HIDDEN,
+      name: "DojoShuriken" + i,
       brushStrokes: base.map((s) => figmin.sketch.cloneStroke(s)),
       colliderType: figmin.ColliderType.SPHERE
     });
     const rec = {
       obj: obj, state: "idle", live: false, expire: 0, dir: { x: 0, y: 0, z: 1 },
-      base: V.zero(), phase: 0, spin: 0, samples: [], streak: null,
+      base: V.zero(), phase: 0, spin: 0, samples: [], streak: null, prevPos: null,
       onHit: null, listening: false
     };
     shurikens.push(rec);
     trackLoad(obj, (o) => {
+      if (o.name) shurikenByName.set(o.name, rec);
       o.interactionState = figmin.InteractionState.LOCKED;
       o.addComponent(figmin.ComponentType.PHYSICS, {
         mass: 0.25,
@@ -1027,12 +1033,6 @@ function endGame(reason) {
 
   hideBomb();
   shurikens.forEach((s) => { if (s.state === "floating") hideShuriken(s); });
-  samurai.forEach((rec) => {
-    if (rec.alive && !rec.fallen) {
-      // Freeze survivors in place for a moment of shame
-      rec.obj.physics.kinematic = true;
-    }
-  });
   setTimeout(() => { if (game.phase === "over") clearSamurai(); }, 2500);
 
   const head = reason === "bomb" ? "BOOM!" : "TIME!";
@@ -1188,13 +1188,8 @@ function placeSamurai(rec, pos) {
   rec.fallen = false;
   rec.rising = true;
   rec.riseT = 0;
-  rec.lastKnock = -10;
-  rec.hitAt = -10;
 
   const o = rec.obj;
-  o.physics.velocity = V.zero();
-  o.physics.angularVelocity = V.zero();
-  o.physics.kinematic = true;
   o.transform.rotation = { x: 0, y: rec.yaw, z: 0 };   // model front (+Z) faces the player
   o.transform.position = { x: pos.x, y: pos.y - riseDepth(rec), z: pos.z };
   o.active = true;
@@ -1210,7 +1205,6 @@ function hideSamurai(rec) {
   rec.pending = false;
   rec.fallen = false;
   rec.rising = false;
-  rec.obj.physics.kinematic = true;
   rec.obj.active = false;
   rec.obj.transform.position = HIDDEN;
 }
@@ -1227,68 +1221,75 @@ function updateSamurai(dt) {
       o.transform.position = { x: rec.target.x, y: rec.target.y - riseDepth(rec) * (1 - e), z: rec.target.z };
       if (rec.riseT >= 1) {
         rec.rising = false;
-        rec.physicsAt = game.now;
-        o.physics.kinematic = false;
-        o.physics.sleeping = false;
         listenForHits(rec, true);
       }
       continue;
     }
 
     if (rec.fallen) {
-      if (game.now >= rec.removeAt) hideSamurai(rec);
-      continue;
-    }
-
-    const wasHit = game.now - rec.hitAt < HIT_CREDIT_SECONDS;
-
-    // Shot away right after rising without being hit = the room pushed it out
-    // (overlapping a wall / furniture / another samurai). Remove it quietly.
-    if (!wasHit && game.now - rec.physicsAt < 0.6 && V.len(o.physics.velocity) > EJECT_SPEED) {
-      console.warn("A " + rec.model + " was pushed out by something in the room; removed (no points)");
-      hideSamurai(rec);
-      continue;
-    }
-
-    const up = o.transform.up;
-    const p = o.transform.position;
-    const tipped = up.y < FALL_UP_Y || p.y < rec.target.y - 0.3;
-    const lost = p.y < -3 || V.len(V.flat(V.sub(p, game.arena.center))) > 12;
-
-    if (tipped || lost) {
-      rec.fallen = true;
-      listenForHits(rec, false);
-      rec.removeAt = game.now + 1.6;
-      if (game.phase === "playing" && wasHit) {
-        game.score += rec.points;
-        showPopup(rec.points, p);
-        updateHud();
-      } else if (!wasHit) {
-        console.warn("A " + rec.model + " fell over without being hit; no points");
+      if (rec.fallT < FALL_TIME) {
+        rec.fallT = Math.min(FALL_TIME, rec.fallT + dt);
+        poseFalling(rec);
+      } else if (game.now >= rec.removeAt) {
+        hideSamurai(rec);
       }
       continue;
     }
 
-    // Katana sweep check (backup for physics contacts)
+    // Katana sweep check (backup for collision events)
     checkKatanaVsSamurai(rec);
   }
 }
 
+/* Hit by a shuriken or the katana: points count right away, then it topples
+   over in the push direction. The fall is animated here, not by physics, so
+   walls and furniture can't stop it (or push a standing samurai around). */
 function knock(rec, dir, strength) {
   if (!rec.alive || rec.fallen || rec.rising) return;
-  rec.hitAt = game.now;
-  if (game.now - rec.lastKnock < 0.25) return;
-  rec.lastKnock = game.now;
-
   let d = V.norm(V.flat(dir));
   if (V.len(d) < 0.5) {
     d = V.norm(V.flat(V.sub(rec.obj.transform.position, camera.transform.position)));
   }
-  const s = strength;
-  rec.obj.physics.sleeping = false;
-  rec.obj.physics.velocity = { x: d.x * 1.6 * s, y: 0.6 * s, z: d.z * 1.6 * s };
-  // Spin around (up x d) so the top tips over in the push direction
-  rec.obj.physics.angularVelocity = { x: d.z * 4 * s, y: rand(-1, 1), z: -d.x * 4 * s };
+  if (V.len(d) < 0.5) d = { x: -Math.sin(rec.yaw / DEG), y: 0, z: -Math.cos(rec.yaw / DEG) };   // backwards
+
+  rec.fallen = true;
+  rec.fallT = 0;
+  rec.fallDir = d;
+  rec.fallSlide = FALL_SLIDE * clamp(strength, 0.5, 2);
+  rec.removeAt = game.now + FALL_TIME + LIE_TIME;
+  listenForHits(rec, false);
+
+  if (game.phase === "playing") {
+    game.score += rec.points;
+    showPopup(rec.points, rec.target);
+    updateHud();
+  }
+}
+
+/* Topple around the bottom of the figure: angle speeds up like a real fall
+   (0 → 90°), sliding a little back, resting on its side at the end */
+function poseFalling(rec) {
+  const u = rec.fallT / FALL_TIME;
+  const ang = (Math.PI / 2) * u * u;
+  const d = rec.fallDir;
+  const up = { x: d.x * Math.sin(ang), y: Math.cos(ang), z: d.z * Math.sin(ang) };
+  const foot = V.add({ x: rec.target.x, y: rec.target.y - rec.halfH, z: rec.target.z },
+                     V.scale(d, rec.fallSlide * (1 - (1 - u) * (1 - u))));
+  const lift = rec.halfT * Math.sin(ang);   // keeps the lying body on top of the floor
+  rec.obj.transform.position = V.add(foot, { x: up.x * rec.halfH, y: up.y * rec.halfH + lift, z: up.z * rec.halfH });
+  // Standing yaw, then tipped around the horizontal axis (up × d)
+  const yaw = { x: 0, y: Math.sin(rec.yaw / DEG / 2), z: 0, w: Math.cos(rec.yaw / DEG / 2) };
+  const s = Math.sin(ang / 2);
+  rec.obj.transform.rotationq = quatMul({ x: d.z * s, y: 0, z: -d.x * s, w: Math.cos(ang / 2) }, yaw);
+}
+
+function quatMul(a, b) {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+  };
 }
 
 /* =========================================================================
@@ -1324,9 +1325,8 @@ function checkKatanaVsSamurai(rec) {
   const axis = rec.halfH * SAMURAI_AXIS_FRAC;
   const a = V.add(t.position, V.scale(t.up, -axis));
   const b = V.add(t.position, V.scale(t.up,  axis));
-  if (segSegDist(k.base, k.tip, a, b) < rec.hitR) {
-    rec.hitAt = game.now;   // even a slow push with the blade counts as your hit
-    if (katanaSpeed() >= KATANA_MIN_SPEED) knock(rec, katanaKnockDir(rec), katanaStrength());
+  if (segSegDist(k.base, k.tip, a, b) < rec.hitR && katanaSpeed() >= KATANA_MIN_SPEED) {
+    knock(rec, katanaKnockDir(rec), katanaStrength());
   }
 }
 
@@ -1395,7 +1395,24 @@ function throwHeldShuriken(rec) {
   o.physics.velocity = vel;
   o.physics.angularVelocity = V.scale(o.transform.up, 25);   // spin flat like a real one
   if (rec.streak) rec.streak.active = true;
+  rec.prevPos = now.p;
   if (rec.live) listenForHits(rec, true);
+}
+
+/* Backup for collision events: did the shuriken pass through a samurai's body
+   since last frame? (Fast throws can cross a figure between two frames.) */
+function checkShurikenVsSamurai(s) {
+  const p = s.obj.transform.position;
+  const from = s.prevPos || p;
+  s.prevPos = p;
+  for (const rec of samurai) {
+    if (!rec.alive || rec.fallen || rec.rising) continue;
+    const t = rec.obj.transform;
+    const axis = rec.halfH * SAMURAI_AXIS_FRAC;
+    const a = V.add(t.position, V.scale(t.up, -axis));
+    const b = V.add(t.position, V.scale(t.up,  axis));
+    if (segSegDist(from, p, a, b) < rec.hitR + SHURIKEN_HIT_PAD) knock(rec, s.dir, 1.0);
+  }
 }
 
 function hideShuriken(rec) {
@@ -1422,8 +1439,9 @@ function updateShurikens(dt) {
       // Remember the last few positions to work out the throw speed on release
       s.samples.push({ t: game.now, p: s.obj.transform.position });
       if (s.samples.length > 12) s.samples.shift();
-    } else if (s.state === "thrown" && game.now >= s.expire) {
-      hideShuriken(s);
+    } else if (s.state === "thrown") {
+      if (game.now >= s.expire) hideShuriken(s);
+      else if (s.live) checkShurikenVsSamurai(s);
     }
   }
 }
