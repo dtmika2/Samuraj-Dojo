@@ -167,9 +167,10 @@ const INNOCENT_POINTS    = -2;    // toppling a monk or geisha costs points
 const SPAWN_MIN_DIST     = 1.6;   // meters from player
 const SPAWN_MAX_DIST     = 3.0;
 const SPAWN_RETRY        = 0.25;  // seconds before trying again when the room blocked a spot
-const FALL_TIME          = 0.55;  // seconds a hit samurai takes to topple flat (scripted, not physics)
-const FALL_SLIDE         = 0.25;  // meters a hit samurai slides back while toppling (× hit strength)
-const LIE_TIME           = 1.1;   // seconds it lies on the floor before disappearing
+const FALL_BUMPS         = 2;     // after a hit: bumps into walls / furniture before it stops reacting (freezes)
+const FALL_PHYSICS_TIME  = 1.5;   // seconds of real physics after a hit; then it freezes anyway
+const FALL_MAX_SPEED     = 4;     // m/s; a falling samurai is never faster (no flying off out of a wall)
+const FALL_REMOVE_TIME   = 2.2;   // seconds after the hit before it disappears
 const SHURIKEN_POOL      = 8;
 const SHURIKEN_EVERY     = 5;     // seconds between new floating shurikens
 const SHURIKEN_MAX_FLOAT = 3;     // max shurikens floating and waiting to be grabbed
@@ -680,10 +681,10 @@ function buildSamurai(k, model, strokes) {
     obj: obj, model: model, kind: k.kind, points: k.points,
     alive: false, pending: false, fallen: false,
     rising: false, riseT: 0, target: V.zero(), yaw: 0,
-    fallT: 0, fallDir: V.zero(), fallSlide: 0, removeAt: 0,
-    onHit: null, listening: false,
+    frozen: false, bumps: 0, freezeAt: 0, removeAt: 0,
+    onHit: null, hitFields: ["objectName", "normal"], listening: false,
     // replaced with the real size once loaded
-    halfH: SAMURAI_HEIGHT / 2, halfT: 0.15, footR: 0.4, hitR: 0.15
+    halfH: SAMURAI_HEIGHT / 2, footR: 0.4, hitR: 0.15
   };
   samurai.push(rec);
   const makeBackup = () => (rec.obj = figmin.createObject(figmin.ObjectType.SKETCH, {
@@ -697,7 +698,6 @@ function buildSamurai(k, model, strokes) {
     const size = o.transform.size;
     if (size && size.y > 0.1) {
       rec.halfH = size.y / 2;
-      rec.halfT = Math.min(size.x, size.z) / 2;
       rec.footR = Math.max(size.x, size.z) / 2;
       rec.hitR = clamp(Math.min(size.x, size.z) / 2 * SAMURAI_HIT_FRAC, SAMURAI_HIT_MIN, SAMURAI_HIT_MAX);
     }
@@ -720,9 +720,10 @@ function buildSamurai(k, model, strokes) {
     o.active = false;
     samuraiByName.set(o.name, rec);
 
-    // Registered only while it stands (see listenForHits). Anything that isn't
-    // the katana or a thrown shuriken is ignored.
+    // Registered from the end of its rise until it freezes after a fall (see
+    // listenForHits). Standing: only the katana or a thrown shuriken matter.
     rec.onHit = (hit) => {
+      if (rec.fallen) { onFallenBump(rec, hit); return; }
       if (!hit.objectName) return;
       if (hit.objectName === katanaName) {
         knock(rec, katanaKnockDir(rec), katanaStrength());
@@ -995,7 +996,7 @@ function stopMusic() {
 function listenForHits(rec, on) {
   if (rec.listening === on || !rec.onHit) return;
   rec.listening = on;
-  if (on) rec.obj.collider.onCollisionEnter(rec.onHit, ["objectName"]);
+  if (on) rec.obj.collider.onCollisionEnter(rec.onHit, rec.hitFields || ["objectName"]);
   else rec.obj.collider.onCollisionEnter(null);
 }
 
@@ -1247,6 +1248,7 @@ function hideSamurai(rec) {
   rec.pending = false;
   rec.fallen = false;
   rec.rising = false;
+  rec.obj.physics.kinematic = true;
   rec.obj.active = false;
   rec.obj.transform.position = HIDDEN;
 }
@@ -1269,11 +1271,17 @@ function updateSamurai(dt) {
     }
 
     if (rec.fallen) {
-      if (rec.fallT < FALL_TIME) {
-        rec.fallT = Math.min(FALL_TIME, rec.fallT + dt);
-        poseFalling(rec);
-      } else if (game.now >= rec.removeAt) {
+      if (game.now >= rec.removeAt || o.transform.position.y < game.floorY - 1) {
         hideSamurai(rec);
+      } else if (!rec.frozen) {
+        if (game.now >= rec.freezeAt) {
+          freezeFallen(rec);
+        } else {
+          // Never let it fly off (e.g. hit while standing inside a wall)
+          const v = o.physics.velocity;
+          const speed = V.len(v);
+          if (speed > FALL_MAX_SPEED) o.physics.velocity = V.scale(v, FALL_MAX_SPEED / speed);
+        }
       }
       continue;
     }
@@ -1283,9 +1291,9 @@ function updateSamurai(dt) {
   }
 }
 
-/* Hit by a shuriken or the katana: points count right away, then it topples
-   over in the push direction. The fall is animated here, not by physics, so
-   walls and furniture can't stop it (or push a standing samurai around). */
+/* Hit by a shuriken or the katana: points count right away, then real physics
+   turns on and it topples in the push direction. While standing it is
+   kinematic, so walls, furniture and hands can't push it around. */
 function knock(rec, dir, strength) {
   if (!rec.alive || rec.fallen || rec.rising) return;
   let d = V.norm(V.flat(dir));
@@ -1295,11 +1303,18 @@ function knock(rec, dir, strength) {
   if (V.len(d) < 0.5) d = { x: -Math.sin(rec.yaw / DEG), y: 0, z: -Math.cos(rec.yaw / DEG) };   // backwards
 
   rec.fallen = true;
-  rec.fallT = 0;
-  rec.fallDir = d;
-  rec.fallSlide = FALL_SLIDE * clamp(strength, 0.5, 2);
-  rec.removeAt = game.now + FALL_TIME + LIE_TIME;
-  listenForHits(rec, false);
+  rec.frozen = false;
+  rec.bumps = 0;
+  rec.freezeAt = game.now + FALL_PHYSICS_TIME;
+  rec.removeAt = game.now + FALL_REMOVE_TIME;
+
+  const s = strength;
+  const o = rec.obj;
+  o.physics.kinematic = false;
+  o.physics.sleeping = false;
+  o.physics.velocity = { x: d.x * 1.6 * s, y: 0.6 * s, z: d.z * 1.6 * s };
+  // Spin around (up x d) so the top tips over in the push direction
+  o.physics.angularVelocity = { x: d.z * 4 * s, y: rand(-1, 1), z: -d.x * 4 * s };
 
   if (game.phase === "playing") {
     game.score += rec.points;
@@ -1308,30 +1323,20 @@ function knock(rec, dir, strength) {
   }
 }
 
-/* Topple around the bottom of the figure: angle speeds up like a real fall
-   (0 → 90°), sliding a little back, resting on its side at the end */
-function poseFalling(rec) {
-  const u = rec.fallT / FALL_TIME;
-  const ang = (Math.PI / 2) * u * u;
-  const d = rec.fallDir;
-  const up = { x: d.x * Math.sin(ang), y: Math.cos(ang), z: d.z * Math.sin(ang) };
-  const foot = V.add({ x: rec.target.x, y: rec.target.y - rec.halfH, z: rec.target.z },
-                     V.scale(d, rec.fallSlide * (1 - (1 - u) * (1 - u))));
-  const lift = rec.halfT * Math.sin(ang);   // keeps the lying body on top of the floor
-  rec.obj.transform.position = V.add(foot, { x: up.x * rec.halfH, y: up.y * rec.halfH + lift, z: up.z * rec.halfH });
-  // Standing yaw, then tipped around the horizontal axis (up × d)
-  const yaw = { x: 0, y: Math.sin(rec.yaw / DEG / 2), z: 0, w: Math.cos(rec.yaw / DEG / 2) };
-  const s = Math.sin(ang / 2);
-  rec.obj.transform.rotationq = quatMul({ x: d.z * s, y: 0, z: -d.x * s, w: Math.cos(ang / 2) }, yaw);
+/* Falling samurai react to walls and furniture only briefly: after FALL_BUMPS
+   bumps (the floor doesn't count) it stops where it is and ignores everything. */
+function onFallenBump(rec, hit) {
+  if (rec.frozen) return;
+  if (hit.objectName && (hit.objectName === katanaName || shurikenByName.has(hit.objectName))) return;
+  if (hit.normal && Math.abs(hit.normal.y) > 0.7) return;   // floor or a table top
+  rec.bumps++;
+  if (rec.bumps >= FALL_BUMPS) freezeFallen(rec);
 }
 
-function quatMul(a, b) {
-  return {
-    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
-  };
+function freezeFallen(rec) {
+  rec.frozen = true;
+  listenForHits(rec, false);
+  rec.obj.physics.kinematic = true;
 }
 
 /* =========================================================================
