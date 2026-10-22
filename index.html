@@ -81,12 +81,38 @@
     cursor: pointer;
   }
   .toggle input { width: 40px; height: 40px; accent-color: var(--red); }
+  .brand { display: block; width: 100%; max-width: 520px; margin: 0 auto 14px; }
+  .levels {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .levels-title { grid-column: 1 / -1; font-size: 16px; color: var(--muted); letter-spacing: 2px; }
+  .level {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 88px;
+    border-radius: 14px;
+    background: #241c15;
+    border: 3px solid #3a2e22;
+    cursor: pointer;
+  }
+  .level input { position: absolute; opacity: 0; pointer-events: none; }
+  .level b { font-size: 34px; line-height: 1; }
+  .level small { font-size: 18px; color: var(--muted); margin-top: 4px; }
+  .level.selected { border-color: var(--gold); background: #3a1a14; }
+  .level.selected small { color: var(--paper); }
+  .level-hint { font-size: 18px; color: #d8ccb6; margin: 0 0 20px; min-height: 48px; }
   .howto { font-size: 19px; line-height: 1.6; color: #d8ccb6; padding-left: 26px; margin: 0; }
   .howto b { color: var(--paper); }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <img class="brand" src="https://dtmika2.github.io/Samuraj-Dojo/images/logo-scroll.png" alt="NTT DATA">
   <h1>&#x2694; Samurai <span>Dojo</span></h1>
   <p class="sub">Topple as many cardboard samurai as you can in 60 seconds.</p>
 
@@ -104,6 +130,14 @@
     <input type="checkbox" id="bombToggle" checked figmin-persist-state="bombsEnabled">
     Bombs end the game
   </label>
+
+  <div class="levels" role="radiogroup" aria-label="Spawn level">
+    <span class="levels-title">SPAWN LEVEL</span>
+    <label class="level selected"><input type="radio" name="level" value="1" checked><b>1</b><small>Careful</small></label>
+    <label class="level"><input type="radio" name="level" value="2"><b>2</b><small>Busy</small></label>
+    <label class="level"><input type="radio" name="level" value="3"><b>3</b><small>Wild</small></label>
+  </div>
+  <p class="level-hint" id="levelHint"></p>
 
   <ol class="howto">
     <li>Tap the <b>controller connect icon</b> on this window first (until then the katana is locked &mdash; otherwise the trigger would make copies of it).</li>
@@ -132,14 +166,9 @@ const SHOGUN_POINTS      = 3;
 const INNOCENT_POINTS    = -2;    // toppling a monk or geisha costs points
 const HIT_CREDIT_SECONDS = 4;     // a fall only counts if you hit it (or it was hit by a falling one) this recently
 const EJECT_SPEED        = 3;     // m/s; faster than this right after rising, without a hit = pushed out by the room → removed
-const SPAWN_INTERVAL     = 1.5;   // seconds between spawns (when below cap)
-const START_ALIVE        = 3;     // samurai on field at start…
-const ALIVE_RAMP_SECONDS = 15;    // …+1 more every N seconds
 const SPAWN_MIN_DIST     = 1.6;   // meters from player
 const SPAWN_MAX_DIST     = 3.0;
-const SPAWN_ROOM_MIN     = 1.0;   // in a small room, samurai stand this close (in front of the wall) instead
 const SPAWN_RETRY        = 0.25;  // seconds before trying again when the room blocked a spot
-const SPAWN_ARC_DEG      = 55;    // +/- degrees from where you faced at start
 const FALL_UP_Y          = 0.45;  // tipped when up-vector y drops below this
 const SHURIKEN_POOL      = 8;
 const SHURIKEN_EVERY     = 5;     // seconds between new floating shurikens
@@ -154,6 +183,39 @@ const KATANA_MIN_SPEED   = 1.0;   // blade-tip speed (m/s) needed to knock
 const BOMB_EVERY_MIN     = 9;     // seconds between bombs (random range)
 const BOMB_EVERY_MAX     = 14;
 const BOMB_LIFETIME      = 6;     // seconds a bomb stays
+
+/* Spawn levels, picked in the menu. Level 1 = the original careful rules;
+   higher levels spawn more often and let samurai stand closer to (a little past)
+   the scanned walls / furniture and on slightly bumpy floor.
+   interval: seconds between spawns · startAlive / rampSeconds: samurai at start, +1 every N s
+   arcDeg: +/- degrees from where you faced at start · roomMin: closest a samurai stands when a wall is near
+   wallSlack: meters a samurai may stand past the safe distance from a wall · floorTol: floor bumps (m) still OK */
+const SPAWN_LEVELS = {
+  1: { name: "Careful", interval: 1.5, startAlive: 3, rampSeconds: 15, arcDeg: 55, roomMin: 1.0, wallSlack: 0,    floorTol: 0.2,
+       hint: "Samurai only appear on clear floor, well inside your room." },
+  2: { name: "Busy",    interval: 1.0, startAlive: 4, rampSeconds: 10, arcDeg: 65, roomMin: 0.8, wallSlack: 0.35, floorTol: 0.3,
+       hint: "More samurai, faster. They may stand right up against walls and furniture." },
+  3: { name: "Wild",    interval: 0.6, startAlive: 5, rampSeconds: 7,  arcDeg: 75, roomMin: 0.6, wallSlack: 0.7,  floorTol: 0.4,
+       hint: "A crowd! Samurai pop up everywhere, even a little outside the scanned room." }
+};
+
+/* Floating texts (sizes = capital-letter height in meters). "unlit" = solid, fully
+   visible colours (the old "fire" / "diamond" looks were see-through). */
+const TEXT_MATERIAL      = "unlit";
+const SCOREBOARD_SIZE    = 0.08;
+const BANNER_SIZE        = 0.24;  // countdown, HAJIME!
+const RESULT_SIZE        = 0.16;  // "TIME!  12 PTS" (longer text)
+const POPUP_SIZE         = 0.15;  // "+1"
+const POPUP_BIG_SIZE     = 0.19;  // "+3", "-2"
+
+/* Logo (images/logo-scroll.png: the NTT DATA logo on a hanging paper scroll) */
+const LOGO_URL           = "https://dtmika2.github.io/Samuraj-Dojo/images/logo-scroll.png";
+const LOGO_MENU_WIDTH    = 0.5;   // meters, above the scoreboard
+const LOGO_BANNER_WIDTH  = 0.75;  // under the countdown / result
+const LOGO_BG_WIDTH      = 1.6;   // floating in the background during a round
+const LOGO_BG_DIST       = 3.6;   // meters in front of you (closer if a wall is nearer)
+const LOGO_BG_HEIGHT     = 2.05;  // meters above the floor
+const LOGO_TURN          = 0;     // set to 180 if the logos show their back side
 
 /* 3D models (models/game/ in the repo). Figmin may embed this page when it is
    deployed, so the models are loaded from the full GitHub Pages address. */
@@ -229,9 +291,28 @@ const ui = {
   best:   document.getElementById("best"),
   status: document.getElementById("status"),
   start:  document.getElementById("startBtn"),
-  bombs:  document.getElementById("bombToggle")
+  bombs:  document.getElementById("bombToggle"),
+  levels: Array.from(document.querySelectorAll('input[name="level"]')),
+  levelHint: document.getElementById("levelHint")
 };
 function setStatus(html) { ui.status.innerHTML = html; }
+
+function chosenLevel() {
+  const r = ui.levels.find((x) => x.checked);
+  return r ? Number(r.value) : 1;
+}
+
+function showLevel(level) {
+  ui.levels.forEach((x) => {
+    x.checked = Number(x.value) === level;
+    x.parentElement.classList.toggle("selected", x.checked);
+  });
+  ui.levelHint.textContent = SPAWN_LEVELS[level].hint;
+}
+
+function saveProgress() {
+  figmin.saveState(JSON.stringify({ best: game.best, level: chosenLevel() }));
+}
 
 /* =========================================================================
    Game state
@@ -251,6 +332,7 @@ const game = {
   arena: { center: V.zero(), yaw: 0 },
   floorY: 0,               // real floor height under the player, measured at Start
   blockedInRow: 0,         // spawn spots the room rejected since the last successful spawn
+  level: 1,                // spawn level of the current round (SPAWN_LEVELS)
   inputConnected: false,
   lastShownSecond: -1,
   lastShownScore: -1
@@ -267,6 +349,8 @@ const samuraiByOid = new Map();
 const shurikens = [];             // { obj, state: idle|floating|held|thrown, live, expire, dir, ... }
 const popups = {};                // points -> pooled "+1" / "+3" / "-2" texts
 const bomb = { obj: null, live: false, expire: 0, base: V.zero(), phase: 0 };
+const logos = { menu: null, banner: null, bg: null, bgBase: null, bgPhase: 0 };
+const lvl = () => SPAWN_LEVELS[game.level];
 let prevTip = null;
 let tipVel = V.zero();
 
@@ -277,6 +361,7 @@ let loadedCount = 0;
    Boot
    ========================================================================= */
 document.addEventListener("FigminReady", init);
+showLevel(chosenLevel());
 
 function init() {
   if (!figmin.isSpatialApp()) {
@@ -294,6 +379,7 @@ function init() {
     try {
       const parsed = data ? JSON.parse(data) : null;
       if (parsed && typeof parsed.best === "number") game.best = parsed.best;
+      if (parsed && SPAWN_LEVELS[parsed.level]) showLevel(parsed.level);
     } catch (e) { /* first run */ }
     ui.best.textContent = game.best;
   });
@@ -307,9 +393,14 @@ function init() {
   buildShurikenPool();
   buildBomb();
   buildTexts();
+  buildLogos();
   setupHands();
 
   ui.start.addEventListener("click", startGame);
+  ui.levels.forEach((x) => x.addEventListener("change", () => {
+    showLevel(chosenLevel());
+    saveProgress();
+  }));
   figmin.setUpdateFunction(tick);
 }
 
@@ -704,11 +795,11 @@ function buildTexts() {
     rotation: winRot,
     text: "SAMURAI DOJO",
     font: "classic",
-    size: 0.05,
-    depth: 0.012,
+    size: SCOREBOARD_SIZE,
+    depth: 0.02,
     frontColor: "#f3e9d6",
     sideColor: "#b3261e",
-    material: "metallic"
+    material: TEXT_MATERIAL
   });
   trackLoad(scoreboard, (o) => {
     o.interactionState = figmin.InteractionState.LOCKED;
@@ -720,11 +811,11 @@ function buildTexts() {
     rotation: winRot,
     text: "HAJIME!",
     font: "classic",
-    size: 0.14,
-    depth: 0.03,
+    size: BANNER_SIZE,
+    depth: 0.04,
     frontColor: "#ffd27a",
     sideColor: "#7a1c1c",
-    material: "fire"
+    material: TEXT_MATERIAL
   });
   trackLoad(banner, (o) => {
     o.interactionState = figmin.InteractionState.LOCKED;
@@ -739,11 +830,11 @@ function buildTexts() {
         rotation: winRot,
         text: (pts > 0 ? "+" : "") + pts,
         font: "classic",
-        size: pts > 1 ? 0.12 : 0.09,
-        depth: 0.02,
+        size: pts === NORMAL_POINTS ? POPUP_SIZE : POPUP_BIG_SIZE,
+        depth: 0.03,
         frontColor: pts > 1 ? "#ffd700" : pts < 0 ? "#ff4a3d" : "#ffffff",
         sideColor: pts > 1 ? "#8a5a00" : pts < 0 ? "#3a0a08" : "#b3261e",
-        material: pts > 1 ? "diamond" : "metallic"
+        material: TEXT_MATERIAL
       });
       const rec = { obj: obj, busy: false, until: 0 };
       popups[pts].push(rec);
@@ -753,6 +844,72 @@ function buildTexts() {
       }, "points-text");
     }
   });
+}
+
+/* The logo scroll: one above the scoreboard (always), one under the countdown /
+   result banner, and a big one floating in the background during a round. */
+function buildLogos() {
+  const make = (key, width, pos, visible) => {
+    const obj = figmin.createObject(figmin.ObjectType.IMAGE, {
+      position: pos,
+      rotation: { x: 0, y: windowYaw() + LOGO_TURN, z: 0 },
+      url: LOGO_URL,
+      targetSize: width,
+      colliderType: figmin.ColliderType.NONE   // never blocks a shuriken or the katana
+    });
+    logos[key] = obj;
+    trackLoad(obj, (o) => {
+      logos[key] = o;
+      o.interactionState = figmin.InteractionState.LOCKED;
+      if (!visible) o.active = false;
+    }, "logo");
+  };
+  make("menu", LOGO_MENU_WIDTH, figmin.getWindowSpawnPosition(0.31, "up"), true);
+  make("banner", LOGO_BANNER_WIDTH, HIDDEN, false);
+  make("bg", LOGO_BG_WIDTH, HIDDEN, false);
+}
+
+function windowYaw() {
+  const f = figmin.getWindow().transform.forward;
+  return Math.atan2(f.x, f.z) * DEG;
+}
+
+function logoReady(o) { return o && o.status.state === figmin.ObjectState.READY; }
+
+/* Hang the big logo in front of you, high up (in front of the wall if one is closer) */
+function placeBackgroundLogo() {
+  const o = logos.bg;
+  if (!logoReady(o)) return;
+  const yaw = game.arena.yaw / DEG;
+  const dir = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+  const y = game.floorY + LOGO_BG_HEIGHT;
+  const hang = (dist) => {
+    logos.bgBase = { x: game.arena.center.x + dir.x * dist, y: y, z: game.arena.center.z + dir.z * dist };
+    logos.bgPhase = 0;
+    o.transform.position = logos.bgBase;
+    o.transform.rotation = { x: 0, y: game.arena.yaw + LOGO_TURN, z: 0 };
+    o.active = true;
+  };
+  figmin.raycastSphere({
+    origin: { x: game.arena.center.x, y: y, z: game.arena.center.z },
+    direction: dir, radius: 0.2, maxDistance: LOGO_BG_DIST + 0.3, layers: [figmin.Layers.SURFACE]
+  }).then((wall) => {
+    const d = wall && typeof wall.distance === "number" ? wall.distance - 0.25 : LOGO_BG_DIST;
+    hang(clamp(d, 1.5, LOGO_BG_DIST));
+  }).catch(() => hang(LOGO_BG_DIST));
+}
+
+function hideBackgroundLogo() {
+  logos.bgBase = null;
+  if (logoReady(logos.bg)) logos.bg.active = false;
+}
+
+function updateBackgroundLogo(dt) {
+  if (!logos.bgBase || !logoReady(logos.bg)) return;
+  logos.bgPhase += dt * 0.8;   // slow float
+  logos.bg.transform.position = {
+    x: logos.bgBase.x, y: logos.bgBase.y + Math.sin(logos.bgPhase) * 0.04, z: logos.bgBase.z
+  };
 }
 
 /* Background music lives on the scoreboard (any object can carry audio).
@@ -818,7 +975,9 @@ function startGame() {
   game.arena.center = V.flat(camera.transform.position);
   game.arena.yaw = cameraYaw();
   game.blockedInRow = 0;
+  game.level = chosenLevel();
   measureFloor();   // answer arrives during the countdown
+  placeBackgroundLogo();
   game.score = 0;
   game.elapsed = 0;
   game.timeLeft = GAME_SECONDS;
@@ -836,14 +995,14 @@ function startGame() {
 
   ui.start.disabled = true;
   ui.start.textContent = "Fight!";
-  setStatus("Get ready&hellip;");
+  setStatus("Get ready&hellip; (spawn level " + game.level + ": " + lvl().name + ")");
   updateHud();
 }
 
 function beginPlaying() {
   game.phase = "playing";
   setStatus("Topple them! Grab floating shurikens with the grip button and throw them.");
-  for (let i = 0; i < START_ALIVE; i++) spawnSamurai();
+  for (let i = 0; i < lvl().startAlive; i++) spawnSamurai();
 }
 
 function endGame(reason) {
@@ -854,7 +1013,7 @@ function endGame(reason) {
   const newBest = game.score > game.best;
   if (newBest) {
     game.best = game.score;
-    figmin.saveState(JSON.stringify({ best: game.best }));
+    saveProgress();
   }
 
   hideBomb();
@@ -868,8 +1027,12 @@ function endGame(reason) {
   setTimeout(() => { if (game.phase === "over") clearSamurai(); }, 2500);
 
   const head = reason === "bomb" ? "BOOM!" : "TIME!";
-  showBanner(head + "  " + game.score + " PTS");
-  setTimeout(() => { if (game.phase === "over") hideBanner(); }, 4000);
+  showBanner(head + "  " + game.score + " PTS", RESULT_SIZE);
+  setTimeout(() => {
+    if (game.phase !== "over") return;
+    hideBanner();
+    hideBackgroundLogo();
+  }, 4000);
 
   updateStartButton();
   setStatus((reason === "bomb" ? "&#x1F4A5; You hit a bomb! " : "Time's up! ") +
@@ -910,7 +1073,7 @@ function spawnSamurai() {
 
   // Pick a direction and distance in front of the player, not too close to other samurai
   let pick = null;
-  const arc = SPAWN_ARC_DEG + Math.min(35, game.blockedInRow * 3);   // look wider if the room keeps saying no
+  const arc = lvl().arcDeg + Math.min(35, game.blockedInRow * 3);   // look wider if the room keeps saying no
   for (let attempt = 0; attempt < 8 && !pick; attempt++) {
     const yaw = (game.arena.yaw + rand(-arc, arc)) / DEG;
     const dist = rand(SPAWN_MIN_DIST, SPAWN_MAX_DIST);
@@ -974,9 +1137,9 @@ function checkSpawnSpot(rec, pick, done) {
     if (wall) {
       const wallDist = typeof wall.distance === "number" ? wall.distance
         : V.len(V.flat(V.sub(wall.point, game.arena.center)));
-      const room = wallDist - margin;
-      if (room < SPAWN_ROOM_MIN) return done(null, "wall/furniture " + wallDist.toFixed(1) + " m away");
-      if (room < dist) dist = rand(SPAWN_ROOM_MIN, room);   // anywhere between you and the wall
+      const room = wallDist - margin + lvl().wallSlack;   // higher levels: closer to / a bit past it
+      if (room < lvl().roomMin) return done(null, "wall/furniture " + wallDist.toFixed(1) + " m away");
+      if (room < dist) dist = rand(lvl().roomMin, room);   // anywhere between you and the wall
     }
     const spot = spotAt(pick.yaw, dist);
     if (crowdedAt(rec, spot)) return done(null, "too close to another samurai");
@@ -986,7 +1149,7 @@ function checkSpawnSpot(rec, pick, done) {
       radius: Math.min(0.35, rec.footR * 0.6), maxDistance: 2.5, layers: surface
     }).then((floor) => {
       const y = floor ? floor.point.y : game.floorY;
-      if (y > game.floorY + 0.2) return done(null, "something " + (y - game.floorY).toFixed(2) + " m high on the floor there");
+      if (y > game.floorY + lvl().floorTol) return done(null, "something " + (y - game.floorY).toFixed(2) + " m high on the floor there");
       done({ x: spot.x, y: Math.max(y, game.floorY) + rec.halfH + 0.02, z: spot.z });
     });
   }).catch((e) => {
@@ -1256,7 +1419,7 @@ function updateShurikens(dt) {
    ========================================================================= */
 function spawnBomb() {
   if (!bomb.obj || bomb.obj.status.state !== figmin.ObjectState.READY) return;
-  const yaw = (game.arena.yaw + rand(-SPAWN_ARC_DEG, SPAWN_ARC_DEG)) / DEG;
+  const yaw = (game.arena.yaw + rand(-lvl().arcDeg, lvl().arcDeg)) / DEG;
   const dist = rand(1.4, 2.4);
   bomb.base = {
     x: game.arena.center.x + Math.sin(yaw) * dist,
@@ -1317,22 +1480,32 @@ function updateBomb(dt) {
 /* =========================================================================
    Floating texts
    ========================================================================= */
-function showBanner(text) {
+function showBanner(text, size) {
   if (!banner || banner.status.state === figmin.ObjectState.DESTROYED) return;
   const cam = camera.transform;
   const f = V.norm(V.flat(cam.forward));
-  banner.transform.position = {
-    x: cam.position.x + f.x * 1.8,
-    y: cam.position.y + 0.25,
-    z: cam.position.z + f.z * 1.8
-  };
+  const at = (dist, up) => ({
+    x: cam.position.x + f.x * dist,
+    y: cam.position.y + up,
+    z: cam.position.z + f.z * dist
+  });
+  banner.transform.position = at(1.8, 0.25);
   banner.transform.rotation = { x: 0, y: cameraYaw(), z: 0 };
+  banner.text3d.size = size || BANNER_SIZE;
   banner.text3d.text = text;
   banner.active = true;
+
+  // Logo scroll just under the text (a little further away so they never overlap)
+  if (logoReady(logos.banner)) {
+    logos.banner.transform.position = at(1.85, -0.05);
+    logos.banner.transform.rotation = { x: 0, y: cameraYaw() + LOGO_TURN, z: 0 };
+    logos.banner.active = true;
+  }
 }
 
 function hideBanner() {
   if (banner && banner.status.state !== figmin.ObjectState.DESTROYED) banner.active = false;
+  if (logoReady(logos.banner)) logos.banner.active = false;
 }
 
 function showPopup(points, pos) {
@@ -1395,6 +1568,7 @@ function tick(dt) {
   updateShurikens(dt);
   updateSamurai(dt);
   updatePopups(dt);
+  updateBackgroundLogo(dt);
 
   if (game.phase === "countdown") {
     game.countdownTimer += dt;
@@ -1418,11 +1592,11 @@ function tick(dt) {
     game.timeLeft = Math.max(0, GAME_SECONDS - game.elapsed);
 
     const cap = Math.min(NORMAL_POOL + SHOGUN_POOL,
-      START_ALIVE + Math.floor(game.elapsed / ALIVE_RAMP_SECONDS));
+      lvl().startAlive + Math.floor(game.elapsed / lvl().rampSeconds));
     game.spawnTimer -= dt;
     if (game.spawnTimer <= 0 && aliveCount() < cap) {
       spawnSamurai();
-      game.spawnTimer = SPAWN_INTERVAL;
+      game.spawnTimer = lvl().interval;
     }
 
     game.shurikenTimer -= dt;

@@ -14,6 +14,8 @@ Gameplay:
 - A **black bomb** appears now and then; hitting it (sword or shuriken) ends the game early ("BOOM!"). Can be disabled with a checkbox.
 - Best score is persisted with `figmin.saveState` / `loadState`.
 - Background music plays from the countdown until the round ends.
+- **Spawn level** (1 Careful / 2 Busy / 3 Wild) picked in the menu, saved with the best score.
+- NTT DATA logo (sponsor/branding) on the menu and in the room.
 
 ## The user
 
@@ -25,7 +27,7 @@ Gameplay:
 ## Figmin XR API — essentials
 
 Official docs: https://www.figmin.com/api/documentation.html
-AI skill file: https://www.figmin.com/api/SKILL.md — **fetch and read this before making API changes**; it is the most compact and accurate reference. Consider saving a copy as `docs/FIGMIN_SKILL.md` for offline reference (it is published by Figmin for exactly this purpose).
+AI skill file: https://www.figmin.com/api/SKILL.md — **fetch and read this before making API changes**; it is the most compact and accurate reference. A copy (2026-10-22) is in `docs/FIGMIN_SKILL.md`; re-fetch if it may be stale.
 
 Rules that bite (all from the docs):
 1. Page must include `<meta name="figmin">` and wait for the `FigminReady` DOM event before calling `figmin.*`.
@@ -45,7 +47,7 @@ Rules that bite (all from the docs):
 
 ## How index.html is organised
 
-Top of the `<script>`: a **TUNING** block of constants (round length, pool sizes, spawn distances, shuriken speed, fall threshold, bomb timing). Change gameplay feel there. It also holds the model setup: `MODEL_BASE` (full Pages URL — Figmin may embed the page, so relative URLs aren't safe), `SAMURAI_HEIGHT`, `KATANA_LENGTH`, `NORMAL_MODELS` / `SHOGUN_MODELS` (which model fills each pool slot), `MODEL_WIDTH_FIX` (targetSize scales the *largest* side; the spear model is wider than tall), and the blade/hit-volume fractions.
+Top of the `<script>`: a **TUNING** block of constants (round length, pool sizes, spawn distances, shuriken speed, fall threshold, bomb timing, `SPAWN_LEVELS`, text sizes / `TEXT_MATERIAL`, logo sizes and placement). Change gameplay feel there. It also holds the model setup: `MODEL_BASE` (full Pages URL — Figmin may embed the page, so relative URLs aren't safe), `SAMURAI_HEIGHT`, `KATANA_LENGTH`, `NORMAL_MODELS` / `SHOGUN_MODELS` (which model fills each pool slot), `MODEL_WIDTH_FIX` (targetSize scales the *largest* side; the spear model is wider than tall), and the blade/hit-volume fractions.
 
 Sections, in order:
 - Vector helpers `V`, `clamp`, `rand`, `segSegDist` (segment–segment distance, used for sword hit tests).
@@ -53,7 +55,7 @@ Sections, in order:
 - `init()` on `FigminReady`: spatial-app + master checks, load best score, build everything, set update loop.
 - `trackLoad(obj, onReady, label, makeBackup?)`: counts objects to READY; per-group report; tolerant of setup errors (try/catch) and load errors; after 15 s of loading the status box lists which group is stuck. If a MODEL3D fails (`onError`) and `makeBackup` is given, it creates the sketch version instead and the report says "using backup shape". `onReady` must use the object it receives (it may be the backup).
 - Geometry builders (procedural sketch strokes): `katanaStrokes`, `samuraiStrokes(isShogun)` — only used as backups for failed models — plus `shurikenStrokes`, `bombStrokes` (always used).
-- Object pools created once at startup (hidden at y = -20, `active = false`): katana (1, MODEL3D, EXACT collider — allowed since it has no physics; BOX around the curved blade was ~10 cm thick), samurai records (6 normal + 2 shogun + 2 innocent, MODEL3D, APPROXIMATE (convex) collider — BOX was far too big around arms/spears/banners; sketch backups use BOX; `rec.kind` / `rec.points`), shurikens (8, scaled ×`SHURIKEN_SCALE`, Light2 trail only while thrown), bomb (1), scoreboard text, banner text, "+1"/"+3"/"-2" popup texts (4 + 2 + 2). Total 30 objects.
+- Object pools created once at startup (hidden at y = -20, `active = false`): katana (1, MODEL3D, EXACT collider — allowed since it has no physics; BOX around the curved blade was ~10 cm thick), samurai records (6 normal + 2 shogun + 2 innocent, MODEL3D, APPROXIMATE (convex) collider — BOX was far too big around arms/spears/banners; sketch backups use BOX; `rec.kind` / `rec.points`), shurikens (8, scaled ×`SHURIKEN_SCALE`, Light2 trail only while thrown), bomb (1), scoreboard text, banner text, "+1"/"+3"/"-2" popup texts (4 + 2 + 2), 3 logo images. Total 33 objects.
 - Samurai records carry `halfH` / `footR` read from `transform.size` after load (models are centered on their bounding box). Spawn spacing uses `footR` so wide colliders (axe, spear) don't overlap.
 - Spawning is room-aware and async: `measureFloor()` at Start probes the real floor under the player (`game.floorY`; a freshly mapped Figmin scene isn't always at y = 0). `spawnSamurai` picks a direction/distance (`rec.pending`); `checkSpawnSpot` probes (`raycastSphere`, `Layers.SURFACE`) from the Start position at waist height along that direction — if a wall/furniture is closer, the samurai is placed between `SPAWN_ROOM_MIN` and the wall (minus its footprint) instead of being rejected; then probes down for the floor there (> floorY + 0.2 = table/bed = blocked). Rejections (`spawnBlocked`) retry after `SPAWN_RETRY`, widen the arc, and after 12 in a row with an empty field show a "not much free floor" hint. Then `placeSamurai` rises it out of the floor and turns physics on (`rec.physicsAt`).
 - History: v3 rejected any spot with a wall closer than the wanted distance and required floor |y| < 0.2; after the user switched Meta to roomscale and mapped a new Figmin scene, almost every spot was rejected ("maybe 2 per minute"). Without a room scan there are no SURFACE colliders, so the checks always pass.
@@ -63,6 +65,9 @@ Sections, in order:
 - `enableInputConnect` is called from `onAllLoaded` (`setupInputConnect`) so `grabbableObjects` can list the katana and all shurikens. Trigger/A/X are still requested only so Figmin doesn't act on them.
 - Controller connection gates the game: katana is `LOCKED` until `enableInputConnect` reports connected (then `ENABLED`), Start button disabled until connected (`updateStartButton`). Reason: unconnected, Figmin owns the trigger, and trigger-while-holding duplicates the object (Tilt Brush heritage) — the user saw the katana "clone itself and stay in place". Grip inputs are not requested.
 - Katana model is pre-straightened: blade along local +Y, tip up, centered; `katanaSegment()` uses `BLADE_*_FRAC × transform.size.y`.
+- **Spawn levels** (`SPAWN_LEVELS`, added 2026-10-22 on user request: "how forgiving the rules about spawning should be together with frequency"): level 1 = the earlier fixed values. Each level sets spawn `interval`, `startAlive`, `rampSeconds`, `arcDeg`, `roomMin`, `wallSlack` (added to the room left before a wall, so samurai may stand closer to / slightly past it; the margin `footR + 0.15` is conservative because `footR` is the *widest* side while the depth toward the wall is the thin side) and `floorTol` (floor bumps accepted by the down probe). `game.level` is read from the radio buttons at Start (`lvl()`), saved in the `saveState` JSON as `level`. Spots that end up inside room geometry are still removed by the ejection check.
+- **Logos**: `images/logo-scroll.png` (generated from the original NTT DATA PNG: logo colours unchanged, on a paper scroll with wooden rollers). Three IMAGE objects (`logos.menu` above the scoreboard, `logos.banner` shown/hidden with the countdown/result banner, `logos.bg` hung `LOGO_BG_DIST` ahead at `LOGO_BG_HEIGHT` during a round, closer if a wall raycast hits, slow bob), collider NONE, tracked as load group "logo". Image facing is unverified: `LOGO_TURN = 180` flips them all. The HTML menu shows the same image at the top.
+- **Floating texts** use `TEXT_MATERIAL = "unlit"` and larger sizes (2026-10-22: user said they were too small and the "fire" / "diamond" materials looked see-through). The result banner uses the smaller `RESULT_SIZE` because the text is long.
 - Hits: `knock(rec, dir, strength)` sets velocity + angular velocity to tip the samurai in the push direction.
   - Shuriken → `collider.onCollisionEnter` on each shuriken, looked up via `samuraiByOid`.
   - Katana → both a collision callback on samurai (by object name `DojoKatana`) **and** a geometric check every frame (blade segment vs samurai axis within `rec.hitR` = 60 % of half the body's slimmer side, clamped 0.10–0.22 m — was a fixed 0.30 m, user: "the katana has a too big hitbox"; knocks only when blade-tip speed > `KATANA_MIN_SPEED`). The geometric check exists because a grabbed non-physics object may not generate collisions.
