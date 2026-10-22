@@ -210,9 +210,12 @@ const POPUP_BIG_SIZE     = 0.19;  // "+3", "-2"
 
 /* Logo (images/logo-scroll.png: the NTT DATA logo on a hanging paper scroll) */
 const LOGO_URL           = "https://dtmika2.github.io/Samuraj-Dojo/images/logo-scroll.png";
-const LOGO_BG_WIDTH      = 1.6;   // floating in the background during a round
-const LOGO_BG_DIST       = 3.6;   // meters in front of you (closer if a wall is nearer)
-const LOGO_BG_HEIGHT     = 2.05;  // meters above the floor
+const LOGO_BG_WIDTH      = 1.6;   // shown during a round: hung on a wall ahead of you if one is found
+const LOGO_WALL_HEIGHT   = 1.9;   // center height on the wall (m above the floor)
+const LOGO_WALL_MIN      = 1.2;   // walls closer than this (m) are skipped
+const LOGO_WALL_MAX      = 8;     // look for walls up to this far (m)
+const LOGO_BG_DIST       = 3.6;   // no wall found: floats this far in front of you (closer if something is nearer)
+const LOGO_BG_HEIGHT     = 2.05;  // ...this high above the floor
 const LOGO_TURN          = 0;     // set to 180 if the logo shows its back side
 
 /* 3D models (models/game/ in the repo). Figmin may embed this page when it is
@@ -881,27 +884,67 @@ function buildLogos() {
 
 function logoReady(o) { return o && o.status.state === figmin.ObjectState.READY; }
 
-/* Hang the big logo in front of you, high up (in front of the wall if one is closer) */
-function placeBackgroundLogo() {
+/* Hang the big logo flat on a wall ahead of you. Without a scanned wall it
+   floats in front of you instead (gently bobbing). */
+async function placeBackgroundLogo() {
   const o = logos.bg;
   if (!logoReady(o)) return;
+  const found = await findLogoWall().catch(() => ({ pos: null, ahead: null }));
+  if (!logoReady(o) || (game.phase !== "countdown" && game.phase !== "playing")) return;
+
+  if (found.pos) {
+    logos.bgBase = null;   // no bobbing on a wall
+    o.transform.position = found.pos;
+    o.transform.rotation = { x: 0, y: found.yaw + LOGO_TURN, z: 0 };
+    o.active = true;
+    return;
+  }
+  console.log("No free wall ahead for the logo; it floats instead");
   const yaw = game.arena.yaw / DEG;
   const dir = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };
-  const y = game.floorY + LOGO_BG_HEIGHT;
-  const hang = (dist) => {
-    logos.bgBase = { x: game.arena.center.x + dir.x * dist, y: y, z: game.arena.center.z + dir.z * dist };
-    logos.bgPhase = 0;
-    o.transform.position = logos.bgBase;
-    o.transform.rotation = { x: 0, y: game.arena.yaw + LOGO_TURN, z: 0 };
-    o.active = true;
-  };
-  figmin.raycastSphere({
-    origin: { x: game.arena.center.x, y: y, z: game.arena.center.z },
-    direction: dir, radius: 0.2, maxDistance: LOGO_BG_DIST + 0.3, layers: [figmin.Layers.SURFACE]
-  }).then((wall) => {
-    const d = wall && typeof wall.distance === "number" ? wall.distance - 0.25 : LOGO_BG_DIST;
-    hang(clamp(d, 1.5, LOGO_BG_DIST));
-  }).catch(() => hang(LOGO_BG_DIST));
+  const dist = clamp(found.ahead !== null ? found.ahead - 0.25 : LOGO_BG_DIST, 1.5, LOGO_BG_DIST);
+  logos.bgBase = { x: game.arena.center.x + dir.x * dist, y: game.floorY + LOGO_BG_HEIGHT, z: game.arena.center.z + dir.z * dist };
+  logos.bgPhase = 0;
+  o.transform.position = logos.bgBase;
+  o.transform.rotation = { x: 0, y: game.arena.yaw + LOGO_TURN, z: 0 };
+  o.active = true;
+}
+
+/* Rays from where you stood at Start, straight ahead first, then wider and wider.
+   A hit counts as a wall if it's upright, faces you, and is wide enough for the
+   whole scroll (two more rays check both ends aren't hanging over a door or corner). */
+async function findLogoWall() {
+  const surface = [figmin.Layers.SURFACE];
+  const c = game.arena.center;
+  const origin = { x: c.x, y: game.floorY + LOGO_WALL_HEIGHT, z: c.z };
+  const angles = [0, -15, 15, -30, 30, -45, 45, -60, 60, -75, 75];
+  const scans = await Promise.all(angles.map((a) => {
+    const yaw = (game.arena.yaw + a) / DEG;
+    const dir = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+    return figmin.raycast({ origin: origin, direction: dir, maxDistance: LOGO_WALL_MAX, layers: surface })
+      .then((hit) => ({ dir: dir, hit: hit }), () => ({ dir: dir, hit: null }));
+  }));
+  const ahead = scans[0].hit && typeof scans[0].hit.distance === "number" ? scans[0].hit.distance : null;
+
+  for (const { dir, hit } of scans) {
+    if (!hit || !hit.normal || !(hit.distance >= LOGO_WALL_MIN)) continue;
+    if (Math.abs(hit.normal.y) > 0.3) continue;            // floor, ceiling, table top
+    const n = V.norm(V.flat(hit.normal));
+    if (V.dot(n, dir) > -0.5) continue;                     // seen too much from the side
+    const along = { x: n.z, y: 0, z: -n.x };
+    const ends = await Promise.all([-1, 1].map((side) => {
+      const from = V.add(V.add(hit.point, V.scale(along, side * LOGO_BG_WIDTH / 2)), V.scale(n, 0.5));
+      return figmin.raycast({ origin: from, direction: V.scale(n, -1), maxDistance: 0.8, layers: surface })
+        .catch(() => null);
+    }));
+    if (ends.some((e) => !e || Math.abs(e.distance - 0.5) > 0.12)) continue;
+    return {
+      pos: V.add(hit.point, V.scale(n, 0.03)),              // just off the wall surface
+      yaw: Math.atan2(-n.x, -n.z) * DEG,                     // picture faces out of the wall
+      ahead: ahead
+    };
+  }
+  return { pos: null, ahead: ahead };
 }
 
 function hideBackgroundLogo() {
@@ -991,8 +1034,7 @@ function startGame() {
   game.arena.yaw = cameraYaw();
   game.blockedInRow = 0;
   game.level = chosenLevel();
-  measureFloor();   // answer arrives during the countdown
-  placeBackgroundLogo();
+  measureFloor().then(placeBackgroundLogo);   // answers arrive during the countdown
   game.score = 0;
   game.elapsed = 0;
   game.timeLeft = GAME_SECONDS;
@@ -1171,7 +1213,7 @@ function checkSpawnSpot(rec, pick, done) {
 /* The real floor under the player (a freshly mapped room isn't always exactly at y = 0) */
 function measureFloor() {
   const eye = camera.transform.position;
-  figmin.raycastSphere({
+  return figmin.raycastSphere({
     origin: eye, direction: { x: 0, y: -1, z: 0 }, radius: 0.1, maxDistance: 3,
     layers: [figmin.Layers.SURFACE]
   }).then((hit) => {
