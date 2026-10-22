@@ -30,7 +30,7 @@ A 60-second mixed-reality physics game for **Figmin XR**. Grab a katana, throw s
 
 - `index.html` — the whole game (single self-contained page)
 - `models/game/` — the 3D models (GLB) the game loads (see `models/README.md`)
-- `images/logo-scroll.png` — the NTT DATA logo on a paper scroll, shown on the menu, above the scoreboard, under the countdown / result, and floating in the background during a round (`images/Logo_Global_NTT_DATA_Future_Blue_RGB.png` is the original)
+- `images/logo-scroll.png` — the NTT DATA logo on a paper scroll, shown at the top of the menu and floating in the background during a round (`images/Logo_Global_NTT_DATA_Future_Blue_RGB.png` is the original)
 - `audio/final-taiko-clash.mp3` — background music, plays from the countdown until the round ends
 - `CLAUDE.md` — project notes for continuing development with Claude Code
 
